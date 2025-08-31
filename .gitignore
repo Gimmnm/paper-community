@@ -1,1 +1,57 @@
+# --- OS / 编辑器 ---
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Python 通用 ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.dylib
+*.egg-info/
+.eggs/
+build/
+dist/
+.mypy_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- 虚拟环境 / 凭据 ---
+.venv/
+venv/
+.env
+*.env
+
+# --- 缓存 / 第三方下载 ---
+.cache/
+.cache_dir/
+.huggingface/
+transformers_cache/
+torch_cache/
+datasets/
+logs/
+tmp/
+*.log
+
+# --- 本项目的可再生输出（不入库） ---
+# 图数据导出
+data/graph/**
+!data/graph/.gitkeep          # 保留空目录的占位文件
+
+# 评测/可视化等输出
+outputs/**
+!outputs/.gitkeep
+
+# 各类中间文件（按需保留/忽略）
+data/*.npy
+data/*.npz
+data/*.pkl
+data/*_layout*.csv
+data/*_coords*.csv
+
+# 如果 embeddings 是从上游项目产出的，也建议忽略：
+data/embeddings*.npy
+data/embeddings*.npz

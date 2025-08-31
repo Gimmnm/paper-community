@@ -19,8 +19,8 @@
 ```bash
 paper-community/
 ├─ README.md
-├─ pyproject.toml              # 或 requirements.txt（二选一）
 ├─ requirements.txt
+├─ environment.yml
 ├─ configs/
 │  └─ default.yaml             # 运行参数
 ├─ data/                       # 输入/输出数据(建议 .gitignore)
@@ -41,31 +41,109 @@ paper-community/
 │  ├─ community.py
 │  ├─ layout.py
 │  ├─ metrics.py
-│  └─ utils.py
-├─ backend/                    # (5) FastAPI + SQLite/Postgres
-│  ├─ app.py
-│  ├─ db.py
-│  ├─ models.py
-│  ├─ schemas.py
-│  ├─ crud.py
-│  ├─ api.py                   # 路由
-│  └─ tests/
-│     └─ test_api.py
-└─ web/                        # (4) React + Vite + TS + Tailwind + Sigma.js(Graphology)
-   ├─ index.html
-   ├─ package.json
-   ├─ vite.config.ts
-   └─ src/
-      ├─ main.tsx
-      ├─ App.tsx
-      ├─ api.ts
-      ├─ components/
-      │  └─ GraphView.tsx
-      ├─ pages/
-      │  ├─ Home.tsx
-      │  ├─ Graph.tsx
-      │  ├─ Papers.tsx
-      │  ├─ Search.tsx
-      │  └─ PaperDetail.tsx
-      └─ styles.css
+├─ backend/
+│  ├─ app/
+│  │  ├─ main.py                # FastAPI 入口，读CSV并暴露API
+│  │  ├─ loaders.py             # 读 nodes/edges/layout 并缓存
+│  │  └─ schemas.py             # Pydantic 模型（可选）
+│  └─ requirements.txt          # 后端依赖
+├─ web/                         # React 前端（Vite）
+│  ├─ index.html
+│  ├─ package.json
+│  ├─ vite.config.js
+│  └─ src/
+│     ├─ main.jsx
+│     ├─ App.jsx
+│     └─ components/
+│        └─ GraphView.jsx 
+```
+
+### 数据准备
+
+- data/papers.csv
+至少包含列：id,title,authors,abstract
+可选：year, arxiv_id, is_AP, is_NA, categories
+- 如果有 is_AP/is_NA，评估时会自动用它们派生四分类（AP-only/NA-only/AP+NA/Other）。
+- data/embeddings.npy
+形状 (N, D) 的 NumPy 数组，N 必须与 CSV 行数一致，顺序需一一对应（通常 title + abstract 编码的向量）。
+
+## 项目运行
+
+```bash
+# 建环境（首次）
+conda env create -f environment.yml
+
+# 激活
+conda activate paper-community
+
+conda activate paper-community
+```
+
+### 建图
+
+```bash
+# 互为 k 近邻（推荐）
+python scripts/build_graph.py --csv data/papers.csv --emb data/embeddings.npy --mode mutual-knn --k 10 --tau 0.30 --outdir data/graph
+```
+
+### 社区发现算法（三选一）
+
+```bash
+# Louvain（快、稳）
+python scripts/run_community.py --graph data/graph/graph.gexf --algo louvain --resolution 2.0
+
+# Leiden（更稳定、更细）
+python scripts/run_community.py --graph data/graph/graph.gexf --algo leiden  --resolution 2.0cd backend
+
+# Infomap（基于信息流，常更细）
+python scripts/run_community.py --graph data/graph/graph.gexf --algo infomap
+```
+
+### 计算布局坐标（可视化的前置）
+
+```bash
+# 在 paper-community-fa2 环境里执行
+python scripts/export_layout.py --graph data/graph/graph.gexf \
+  --layout fa2 --iters 300 --step 25 --init spectral --progress
+  
+```
+
+### 分析与导出结果（评估、命名、JSON）
+
+```bash
+python scripts/analyze_results.py \
+  --papers data/papers.csv \
+  --communities data/graph/communities.csv \
+  --graph data/graph/graph.gexf \
+  --outdir outputs/analysis
+
+```
+
+### 后端运行
+
+```bash
+cd backend
+# 建议：conda activate 你的现有环境；或
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+```
+
+### 前端运行
+
+```bash
+
+mkdir -p web/public/data/graph
+cp data/graph/nodes.csv data/graph/edges.csv data/graph/layout.csv web/public/data/graph/
+
+
+conda install -c conda-forge nodejs=20
+cd web
+rm -rf node_modules package-lock.json
+npm i
+# 如需改 API 地址： export VITE_API_BASE="http://localhost:8000"
+
+npm i -D @vitejs/plugin-react
+
+npm run dev
+# 打开 http://localhost:5173
 ```

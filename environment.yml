@@ -1,0 +1,21 @@
+name: paper-community
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - scikit-learn
+  - networkx>=3.2        # 明确锁定 3.x，避免被 pip 降级
+  - python-louvain
+  - python-igraph
+  - leidenalg
+  - umap-learn
+  - pip
+  - pip:
+      - infomap          # 让 pip 装（arm64 有轮子）
+# 注意：这里不再写 fa2l，创建环境后手动 pip install --no-deps fa2l
+
+# conda activate paper-community
+# pip install --no-deps fa2l
