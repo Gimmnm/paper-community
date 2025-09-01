@@ -25,50 +25,6 @@
 6. 测试方案
 7. 后续可能实现 动态在线加入论文、分层社区（论文分类逐层递进）的功能
 
-## 项目规划结构
-
-```bash
-paper-community/
-├─ README.md
-├─ requirements.txt
-├─ environment.yml
-├─ configs/
-│  └─ default.yaml             # 运行参数
-├─ data/                       # 输入/输出数据(建议 .gitignore)
-│  ├─ papers.csv               # 论文元数据(id,title,authors,abstract,year,arxiv_id,categories,...)
-│  ├─ embeddings.npy           # 论文向量 (N, D)
-│  └─ graph/                   # 中间产物: nodes.csv, edges.csv, graph.gexf, graph.json
-├─ scripts/
-│  ├─ build_graph.py           # (1) 建图：mutual kNN / 阈值
-│  ├─ run_community.py         # (2) Louvain / Infomap / Leiden
-│  ├─ gnn_train.py             # (2) GNN + 聚类（可选）
-│  ├─ analyze_results.py       # (3) 评估+命名（TF-IDF）+导出 JSON
-│  ├─ export_layout.py         # (3) 预计算力导向布局/UMAP
-│  ├─ load_db.py               # (5) 把 nodes/edges/communities 导入数据库
-│  └─ demo_all.sh              # 一键串起来
-├─ pcore/                      # Python 核心库（graph/社区/IO/评估）
-│  ├─ __init__.py
-│  ├─ graph.py
-│  ├─ community.py
-│  ├─ layout.py
-│  ├─ metrics.py
-├─ backend/
-│  ├─ app/
-│  │  ├─ main.py                # FastAPI 入口，读CSV并暴露API
-│  │  ├─ loaders.py             # 读 nodes/edges/layout 并缓存
-│  │  └─ schemas.py             # Pydantic 模型（可选）
-│  └─ requirements.txt          # 后端依赖
-├─ web/                         # React 前端（Vite）
-│  ├─ index.html
-│  ├─ package.json
-│  ├─ vite.config.js
-│  └─ src/
-│     ├─ main.jsx
-│     ├─ App.jsx
-│     └─ components/
-│        └─ GraphView.jsx 
-```
-
 ### 数据准备
 
 - data/papers.csv
