@@ -14,15 +14,16 @@
     "graphology": "0.26.0",
     "graphology-layout-forceatlas2": "0.10.1",
     "papaparse": "5.4.1",
-    "react": "18.2.0",
-    "react-dom": "18.2.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router-dom": "^6.26.2",
     "sigma": "3.0.2",
     "zustand": "4.5.5"
   },
   "devDependencies": {
     "@types/react": "18.2.66",
     "@types/react-dom": "18.2.22",
-    "@vitejs/plugin-react": "^5.0.2",
+    "@vitejs/plugin-react": "4.3.1",
     "typescript": "5.5.4",
     "vite": "5.3.4"
   }

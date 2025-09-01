@@ -139,10 +139,12 @@ cp data/graph/nodes.csv data/graph/edges.csv data/graph/layout.csv web/public/da
 conda install -c conda-forge nodejs=20
 cd web
 rm -rf node_modules package-lock.json
-npm i
+npm cache clean --force
+npm install --registry=https://registry.npmjs.org
 # 如需改 API 地址： export VITE_API_BASE="http://localhost:8000"
 
 npm i -D @vitejs/plugin-react
+npm i react-router-dom@6
 
 npm run dev
 # 打开 http://localhost:5173

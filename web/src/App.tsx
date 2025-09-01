@@ -1,21 +1,27 @@
 import React from "react";
-import { NavLink, Route, Routes } from "react-router-dom";
+import { Routes, Route, Link } from "react-router-dom";
+import HomePage from "./pages/HomePage";
 import GraphPage from "./pages/GraphPage";
 import ListPage from "./pages/ListPage";
 import DetailPage from "./pages/DetailPage";
 
 export default function App() {
   return (
-    <div style={{ height: "100%" }}>
-      <nav className="nav">
-        <NavLink to="/" end>Graph</NavLink>
-        <NavLink to="/list">List</NavLink>
-      </nav>
+    <div className="app-shell">
+      <header className="topbar">
+        <div className="brand"><Link to="/">Paper Community</Link></div>
+        <nav className="nav">
+          <Link to="/">首页</Link>
+          <Link to="/graph">网络</Link>
+          <Link to="/list">列表</Link>
+        </nav>
+      </header>
 
       <Routes>
-        <Route path="/" element={<GraphPage />} />
+        <Route path="/" element={<HomePage />} />
+        <Route path="/graph" element={<GraphPage />} />
         <Route path="/list" element={<ListPage />} />
-        <Route path="/paper/:id" element={<DetailPage />} />
+        <Route path="/detail/:idx" element={<DetailPage />} />
       </Routes>
     </div>
   );
