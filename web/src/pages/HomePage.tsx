@@ -1,68 +1,89 @@
+// src/pages/HomePage.tsx
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import Papa from "papaparse";
 
-type Stat = { nodes: number; edges: number; communities: number };
+type EdgeRow = Record<string, any>;
+type LayoutRow = Record<string, any>;
+
+async function countCSVRows(path: string): Promise<number> {
+  try {
+    const r = await fetch(path, { cache: "no-store" });
+    if (!r.ok) return 0;
+    const text = await r.text();
+    const p = Papa.parse(text, { header: true, skipEmptyLines: true });
+    return (p.data || []).length;
+  } catch {
+    return 0;
+  }
+}
 
 export default function HomePage() {
-  const [s, setS] = useState<Stat>({ nodes: 0, edges: 0, communities: 0 });
-  const [err, setErr] = useState<string | null>(null);
+  const [nodeCount, setNodeCount] = useState<number>(0);
+  const [edgeCount, setEdgeCount] = useState<number>(0);
 
   useEffect(() => {
+    let canceled = false;
     (async () => {
-      try {
-        // 粗略统计：layout.csv 行数 ≈ 节点数；edges.csv 行数 ≈ 边数；communities.csv 行数 ≈ 记录数
-        const [l, e, c] = await Promise.all([
-          fetch("/data/layout.csv").then(r => r.ok ? r.text() : ""),
-          fetch("/data/edges.csv").then(r => r.ok ? r.text() : ""),
-          fetch("/data/communities.csv").then(r => r.ok ? r.text() : ""),
-        ]);
-        const lc = l ? l.trim().split("\n").length - 1 : 0; // 去表头
-        const ec = e ? e.trim().split("\n").length - 1 : 0;
-        const cc = c ? c.trim().split("\n").length - 1 : 0;
-        setS({ nodes: Math.max(0, lc), edges: Math.max(0, ec), communities: Math.max(0, cc) });
-      } catch (er: any) {
-        setErr(er?.message || String(er));
+      const [n, e] = await Promise.all([
+        countCSVRows("/data/layout.csv"),
+        countCSVRows("/data/edges.csv"),
+      ]);
+      if (!canceled) {
+        setNodeCount(n);
+        setEdgeCount(e);
       }
     })();
+    return () => { canceled = true; };
   }, []);
 
   return (
-    <div className="home-hero">
-      <div className="home-hero__inner">
-        <h1>Paper Community</h1>
-        <p className="lead">
-          从论文嵌入构建图，进行社区发现与可视化浏览。支持 Louvain / Leiden / Infomap，
-          并提供 CSV 导出与前端交互探索。
-        </p>
+    <div className="home">
 
-        <div className="stats">
-          <div className="stat">
-            <div className="stat__num">{s.nodes.toLocaleString()}</div>
-            <div className="stat__label">节点（论文）</div>
+      {/* 英雄区 */}
+      <section className="hero-tech">
+        {/* 背景装饰层 */}
+        <div className="hero-bg-grid" />
+        <div className="hero-glow hero-glow-1" />
+        <div className="hero-glow hero-glow-2" />
+        <div className="hero-glow hero-glow-3" />
+
+        <div className="hero-inner">
+          <div className="hero-badge">arXiv · Graph Explorer</div>
+          <h1 className="hero-title">
+            <span className="hero-title-line">探索论文社区</span>
+            <span className="hero-title-grad">看见结构 · 发现关系</span>
+          </h1>
+          <p className="hero-sub">
+            本地 CSV 即开即用 · 交互网络与列表筛选 · 按社区/四类快速着色 · 点击节点直达详情。
+          </p>
+
+          <div className="hero-ctas">
+            <Link className="btn btn-primary" to="/graph">开始探索网络</Link>
+            <Link className="btn btn-ghost" to="/list">浏览论文列表</Link>
           </div>
-          <div className="stat">
-            <div className="stat__num">{s.edges.toLocaleString()}</div>
-            <div className="stat__label">边（相似度）</div>
+
+          <div className="hero-stats">
+            <div className="stat">
+              <div className="stat__num">{nodeCount.toLocaleString()}</div>
+              <div className="stat__label">节点（论文）</div>
+            </div>
+            <div className="stat">
+              <div className="stat__num">{edgeCount.toLocaleString()}</div>
+              <div className="stat__label">边（相似/关联）</div>
+            </div>
+            <div className="stat">
+              <div className="stat__num">CSV</div>
+              <div className="stat__label">无需后端 · 纯前端</div>
+            </div>
           </div>
-          <div className="stat">
-            <div className="stat__num">{s.communities.toLocaleString()}</div>
-            <div className="stat__label">社区映射</div>
+
+          <div className="hero-note">
+            支持 CSV 文件直接导入，存储于 <code>public/data/</code> 。
           </div>
         </div>
+      </section>
 
-        {!!err && <div className="error-box" style={{maxWidth:820}}>{err}</div>}
-
-        <div className="cta">
-          <Link to="/graph" className="btn btn-primary">进入网络可视化</Link>
-          <Link to="/list" className="btn">浏览论文列表</Link>
-          <a href="https://arxiv.org/" target="_blank" rel="noreferrer" className="btn btn-ghost">了解数据来源</a>
-        </div>
-
-        <div className="tips">
-          <div>· 把 <code>data/layout.csv</code>、<code>data/edges.csv</code>、<code>data/communities.csv</code> 放到 <code>web/public/data/</code></div>
-          <div>· 默认“按社区着色”需要 <code>communities.csv</code>（至少含 <code>index,community</code> 两列）</div>
-        </div>
-      </div>
     </div>
   );
 }

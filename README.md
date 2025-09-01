@@ -1,5 +1,16 @@
 # paper-community
 
+<p align="center">
+  <a href="https://github.com/你的组织或用户名/paper-community">
+    <img src="web/public/pic/logo.svg" alt="Paper Community" height="96">
+  </a>
+</p>
+
+<h1 align="center">Paper Community</h1>
+<p align="center">
+  基于开放数据的论文社区可视化
+</p>
+
 ## 项目介绍
 
 面对日益增长的学术论文数据，科研人员亟需高效、智能的工具以快速定位核心文献并捕捉前沿研究动态。此项目在已有论文的文本深度表示[paper2vector](https://github.com/Gimmnm/paper2vector)后，利用社区发现等算法，提供论文的深层主题分类实现，并且实现页面应用，提升科研信息检索效率与准确性。
@@ -119,33 +130,27 @@ python scripts/analyze_results.py \
 
 ```
 
-### 后端运行
-
-```bash
-cd backend
-# 建议：conda activate 你的现有环境；或
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
-```
-
 ### 前端运行
 
 ```bash
 
-mkdir -p web/public/data/graph
-cp data/graph/nodes.csv data/graph/edges.csv data/graph/layout.csv web/public/data/graph/
-
-
 conda install -c conda-forge nodejs=20
+
 cd web
 rm -rf node_modules package-lock.json
 npm cache clean --force
 npm install --registry=https://registry.npmjs.org
-# 如需改 API 地址： export VITE_API_BASE="http://localhost:8000"
-
-npm i -D @vitejs/plugin-react
-npm i react-router-dom@6
 
 npm run dev
-# 打开 http://localhost:5173
+
 ```
+
+## 项目结果
+
+![Network Graph](/web/public/pic/network.png)
+
+![Network Graph colored by four catogories](/web/public/pic/network_four.png)
+
+![List Page](/web/public/pic/list_page.png)
+
+![Detailed Page](/web/public/pic/detail_page.png)

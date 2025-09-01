@@ -3,8 +3,21 @@ import Papa from "papaparse";
 import { SigmaContainer, useSigma, useRegisterEvents } from "@react-sigma/core";
 import Graph from "graphology";
 import { useNavigate } from "react-router-dom";
-// 顶部 import 区
-import { colorForCommunity, colorForFour, colorForEdgeWeight } from "../lib/colors";
+import { colorForCommunity, colorForFour } from "../lib/colors";
+
+
+function useThemeName() {
+  const getTheme = () => document.documentElement.dataset.theme || "light";
+  const [theme, setTheme] = React.useState<string>(getTheme());
+
+  React.useEffect(() => {
+    const obs = new MutationObserver(() => setTheme(getTheme()));
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => obs.disconnect();
+  }, []);
+
+  return theme as "light" | "ocean" | "midnight";
+}
 
 /** ---------- 类型 ---------- */
 type LayoutRow = {
@@ -15,7 +28,6 @@ type LayoutRow = {
   paper_id?: string;
   title?: string;
   community?: number | string;
-  color?: string;
 };
 type EdgeRow = {
   source?: number | string;
@@ -31,13 +43,14 @@ type LabeledRow = { index?: number | string; four?: string };
 type Stats = { totalNodes: number; usedNodes: number; totalEdges: number; usedEdges: number };
 type LegendItem = { key: string; label: string; color: string; count: number };
 
-/** ---------- 常量 & 工具 ---------- */
-const LIMIT_INITIAL_NODES = 600;
-const LIMIT_INITIAL_EDGES = 12000;
-const ADD_BATCH = 2000;
 type ColorMode = "community" | "four";
 
-function useDebounced<T>(value: T, delay = 300) {
+/** ---------- 常量 ---------- */
+const LIMIT_INITIAL_NODES = 800;       // 初始节点数（可调）
+const ADD_BATCH = 2000;
+
+/** ---------- 小工具 ---------- */
+function useDebounced<T>(value: T, delay = 200) {
   const [v, setV] = useState(value);
   useEffect(() => {
     const t = setTimeout(() => setV(value), delay);
@@ -45,12 +58,13 @@ function useDebounced<T>(value: T, delay = 300) {
   }, [value, delay]);
   return v;
 }
-async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
-  const r = await fetch(url, { cache: "no-store", signal });
-  if (!r.ok) throw new Error(`${url} HTTP ${r.status}`);
-  const t = await r.text();
-  return t.replace(/^\uFEFF/, ""); // 去掉 BOM
+
+function colorForEdgeWeight(w: number): string {
+  const ww = Math.max(0, Math.min(1, w));
+  const alpha = 0.65 + ww * 0.25; // 0.65 ~ 0.90
+  return `rgba(55, 65, 81, ${alpha.toFixed(2)})`; // 深灰蓝
 }
+
 function normalizeXY(rows: LayoutRow[]): LayoutRow[] {
   const xs = rows.map((r) => Number(r.x));
   const ys = rows.map((r) => Number(r.y));
@@ -75,38 +89,29 @@ function resolveTarget(e: EdgeRow): string {
   return String(t);
 }
 
-/** communities.csv → index -> community（双路径） */
-async function loadCommunityMap(signal?: AbortSignal): Promise<Record<number, number>> {
-  const urls = ["/data/communities.csv", "/data/graph/communities.csv"];
-  for (const url of urls) {
-    try {
-      const text = await fetchText(url, signal);
-      const p = Papa.parse<ComRow>(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
-      const map: Record<number, number> = {};
-      for (const row of (p.data || [])) {
-        if (row && row.index != null && row.community != null) {
-          const idx = Number(row.index);
-          const c = Number(row.community);
-          if (Number.isFinite(idx) && Number.isFinite(c)) map[idx] = c;
-        }
-      }
-      const n = Object.keys(map).length;
-      if (n) {
-        console.log(`[graph] communities loaded from ${url}, size=${n}`);
-        return map;
-      }
-    } catch {
-      /* try next */
-    }
-  }
-  console.warn("[graph] communities.csv not found or empty");
-  return {};
-}
-
-/** nodes_labeled.csv → index -> four */
-async function loadFourMap(signal?: AbortSignal): Promise<Record<number, string>> {
+/** 读取 CSV -> Map */
+async function loadCommunityMap(): Promise<Record<number, number>> {
   try {
-    const text = await fetchText("/data/nodes_labeled.csv", signal);
+    const r = await fetch("/data/communities.csv", { cache: "no-store" });
+    if (!r.ok) return {};
+    const text = await r.text();
+    const p = Papa.parse<ComRow>(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
+    const map: Record<number, number> = {};
+    for (const row of (p.data || [])) {
+      if (row && row.index != null && row.community != null) {
+        const idx = Number(row.index);
+        const c = Number(row.community);
+        if (Number.isFinite(idx) && Number.isFinite(c)) map[idx] = c;
+      }
+    }
+    return map;
+  } catch { return {}; }
+}
+async function loadFourMap(): Promise<Record<number, string>> {
+  try {
+    const r = await fetch("/data/nodes_labeled.csv", { cache: "no-store" });
+    if (!r.ok) return {};
+    const text = await r.text();
     const p = Papa.parse<LabeledRow>(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
     const map: Record<number, string> = {};
     for (const row of (p.data || [])) {
@@ -116,38 +121,36 @@ async function loadFourMap(signal?: AbortSignal): Promise<Record<number, string>
         if (Number.isFinite(idx) && v) map[idx] = v;
       }
     }
-    console.log("[graph] nodes_labeled size =", Object.keys(map).length);
     return map;
-  } catch {
-    return {};
-  }
+  } catch { return {}; }
 }
 
+/** 图事件：点击节点 → 详情页 */
 function GraphEvents() {
   const sigma = useSigma();
   const register = useRegisterEvents();
   const navigate = useNavigate();
-
   useEffect(() => {
     register({
       clickNode: ({ node }) => {
         const g = sigma.getGraph();
-        // 优先读 index 属性，兜底用 node key
-        const idxAttr = g.getNodeAttribute(node, "index");
-        const target = (idxAttr !== undefined && idxAttr !== null) ? String(idxAttr) : String(node);
-        navigate(`/detail/${encodeURIComponent(target)}`);
+        const idx = g.getNodeAttribute(node, "index");
+        if (idx != null) navigate(`/detail/${idx}`);
       },
     });
   }, [register, sigma, navigate]);
-
   return null;
 }
-
-/** 悬停高亮邻居 */
 function HoverHighlight({ enabled = true }: { enabled?: boolean }) {
   const sigma = useSigma();
   const register = useRegisterEvents();
+  const theme = useThemeName();                // ← 读主题
   const [hovered, setHovered] = useState<string | null>(null);
+
+  // 按主题确定淡出/高亮颜色
+  const fadedNodeColor = theme === "midnight" ? "#334155" : "#e5e7eb";                  // 深色用 slate-700，浅色用浅灰
+  const fadedEdgeColor = theme === "midnight" ? "rgba(100,116,139,0.18)" : "rgba(209,213,219,0.15)";
+  const neighborEdgeBoost = theme === "midnight" ? 1.15 : 1.25;                         // 深色里少量增强即可
 
   useEffect(() => {
     register({
@@ -158,37 +161,50 @@ function HoverHighlight({ enabled = true }: { enabled?: boolean }) {
 
   useEffect(() => {
     const g = sigma.getGraph();
+
     if (!enabled) {
       sigma.setSetting("nodeReducer", undefined as any);
       sigma.setSetting("edgeReducer", undefined as any);
       sigma.refresh();
       return;
     }
+
     const neighbors = new Set<string>();
     if (hovered) {
       g.forEachNeighbor(hovered, (n) => neighbors.add(String(n)));
       neighbors.add(hovered);
     }
+
     sigma.setSetting("nodeReducer", (n: string, data: any) => {
       if (!hovered) return data;
-      if (neighbors.has(n)) return { ...data, zIndex: 1 };
-      return { ...data, color: "#e5e7eb", label: undefined, zIndex: 0 };
+      if (neighbors.has(n)) {
+        // 高亮节点：保持原色、略提 zIndex
+        return { ...data, zIndex: 1 };
+      }
+      // 非邻居：按主题淡出（深色用更深的灰，避免“发白”）
+      return { ...data, color: fadedNodeColor, label: undefined, zIndex: 0 };
     });
+
     sigma.setSetting("edgeReducer", (e: string, data: any) => {
       if (!hovered) return data;
-      const [s, t] = sigma.getGraph().extremities(e) || [];
-      if (s != null && t != null && neighbors.has(String(s)) && neighbors.has(String(t))) {
-        return { ...data, color: data.color || "rgba(51,65,85,0.92)", size: Math.max(1.2, (data.size || 1)) };
+      const ext = g.extremities(e);
+      if (!ext) return data;
+      const [s, t] = ext;
+      if (neighbors.has(String(s)) && neighbors.has(String(t))) {
+        // 邻接边：保留原色，稍微增粗
+        return { ...data, color: data.color, size: Math.max(1.1, (data.size || 1) * neighborEdgeBoost) };
       }
-      return { ...data, color: "rgba(209,213,219,0.15)", size: Math.max(0.4, (data.size || 1) * 0.4) };
+      // 非邻接边：按主题淡出
+      return { ...data, color: fadedEdgeColor, size: Math.max(0.4, (data.size || 1) * 0.5) };
     });
+
     sigma.refresh();
-  }, [sigma, hovered, enabled]);
+  }, [sigma, hovered, enabled, theme, fadedNodeColor, fadedEdgeColor, neighborEdgeBoost]);
 
   return null;
 }
 
-/** 边/节点尺寸实时缩放 */
+/** 边粗细缩放（不重建） */
 function EdgeSizeUpdater({ edgeScale }: { edgeScale: number }) {
   const sigma = useSigma();
   useEffect(() => {
@@ -203,6 +219,8 @@ function EdgeSizeUpdater({ edgeScale }: { edgeScale: number }) {
   }, [edgeScale, sigma]);
   return null;
 }
+
+/** 节点大小缩放（不重建） */
 function NodeSizeUpdater({ sizeScale }: { sizeScale: number }) {
   const sigma = useSigma();
   useEffect(() => {
@@ -218,7 +236,7 @@ function NodeSizeUpdater({ sizeScale }: { sizeScale: number }) {
   return null;
 }
 
-/** 构图 */
+/** 构图：节点构建、独立的边构建、颜色模式切换仅重染 */
 function BuildGraph({
   nodeLimit,
   edgeLimit,
@@ -244,40 +262,47 @@ function BuildGraph({
 }) {
   const sigma = useSigma();
   const [msg, setMsg] = useState<string | null>(null);
-  const tokenRef = useRef(0);
-  const abortRef = useRef<AbortController | null>(null);
 
-  const dNodeLimit = useDebounced(nodeLimit, 200);
-  const dEdgeLimit = useDebounced(edgeLimit, 200);
-  const dMinWeight = useDebounced(minWeight, 200);
-  const dShowEdges = useDebounced(showEdges, 0);
-  const dColorMode = useDebounced(colorMode, 0);
+  const [comMap, setComMap] = useState<Record<number, number>>({});
+  const [fourMap, setFourMap] = useState<Record<number, string>>({});
 
+  const dNodeLimit = useDebounced(nodeLimit, 150);
+  const dEdgeLimit = useDebounced(edgeLimit, 150);
+  const dMinWeight = useDebounced(minWeight, 150);
+
+  /** 只改设置，不重建 */
   useEffect(() => {
-    sigma.setSetting("renderEdges", dShowEdges);
+    sigma.setSetting("renderEdges", showEdges);
     sigma.setSetting("hideEdgesOnMove", hideEdgesOnMove);
     sigma.refresh();
-  }, [dShowEdges, hideEdgesOnMove, sigma]);
+  }, [showEdges, hideEdgesOnMove, sigma]);
 
+  /** 先把 maps 读好 */
+  useEffect(() => {
+    let cancel = false;
+    (async () => {
+      const [cm, fm] = await Promise.all([loadCommunityMap(), loadFourMap()]);
+      if (!cancel) {
+        setComMap(cm);
+        setFourMap(fm);
+        onCommunityLoad?.(Object.keys(cm).length);
+      }
+    })();
+    return () => { cancel = true; };
+  }, [onCommunityLoad]);
+
+  /** 构建节点（只在 nodeLimit 或数据文件变化时重建） */
   useEffect(() => {
     let canceled = false;
-    const myToken = ++tokenRef.current;
-
-    // 终止上一轮 fetch
-    abortRef.current?.abort();
-    abortRef.current = new AbortController();
-    const { signal } = abortRef.current;
-
-    async function run() {
-      const graph = sigma.getGraph() as Graph;
-      graph.clear();
+    (async () => {
+      const g = sigma.getGraph() as Graph;
+      g.clear();
 
       try {
-        const [comMap, fourMap] = await Promise.all([loadCommunityMap(signal), loadFourMap(signal)]);
-        onCommunityLoad?.(Object.keys(comMap).length);
-
         setMsg("加载 /data/layout.csv ...");
-        const t1 = await fetchText("/data/layout.csv", signal);
+        const r1 = await fetch("/data/layout.csv", { cache: "no-store" });
+        if (!r1.ok) throw new Error(`layout.csv HTTP ${r1.status}`);
+        const t1 = await r1.text();
         const p1 = Papa.parse<LayoutRow>(t1, { header: true, dynamicTyping: true, skipEmptyLines: true });
 
         let rows = (p1.data || []).filter(r => r && r.index != null && r.x != null && r.y != null);
@@ -292,34 +317,27 @@ function BuildGraph({
         const counterCommunity = new Map<number, number>();
         const counterFour = new Map<string, number>();
 
-        console.debug("[graph] building nodes:", usedIdxs.length, "/", totalNodes);
         setMsg(`构建节点 ${usedIdxs.length}/${totalNodes} ...`);
-
         for (const ri of usedIdxs) {
-          if (canceled || tokenRef.current !== myToken) return;
+          if (canceled) return;
           const r = rows[ri];
           const key = String(r.index);
           const idx = Number(r.index);
 
-          const cFromLayout = r.community != null ? Number(r.community) : null;
-          const cFromMap = comMap[idx];
-          const comm = Number.isFinite(cFromLayout as number) ? (cFromLayout as number)
-                         : Number.isFinite(cFromMap) ? cFromMap : null;
-
+          // 社区优先 layout -> communities.csv
+          let comm: number | null = r.community != null ? Number(r.community) : null;
+          if (!Number.isFinite(comm as number)) {
+            const c2 = comMap[idx];
+            comm = Number.isFinite(c2) ? c2 : null;
+          }
           const four = fourMap[idx] || null;
 
-          let col = (r.color ? String(r.color) : null);
-          if (!col) {
-            if (dColorMode === "four" && four) col = colorForFour(four);
-            else col = colorForCommunity(comm);
-          }
-          if (comm != null) counterCommunity.set(comm, (counterCommunity.get(comm) || 0) + 1);
-          if (four) counterFour.set(four, (counterFour.get(four) || 0) + 1);
+          // 初始按当前模式着色
+          const col = colorMode === "four" && four ? colorForFour(four) : colorForCommunity(comm);
 
-          if (!graph.hasNode(key)) {
-            graph.addNode(key, {
-              x: Number(r.x),
-              y: Number(r.y),
+          if (!g.hasNode(key)) {
+            g.addNode(key, {
+              x: Number(r.x), y: Number(r.y),
               label: r.title ? String(r.title) : key,
               size: baseNodeSize,
               color: col,
@@ -330,11 +348,14 @@ function BuildGraph({
               index: idx,
             });
           }
+          if (comm != null) counterCommunity.set(comm, (counterCommunity.get(comm) || 0) + 1);
+          if (four) counterFour.set(four, (counterFour.get(four) || 0) + 1);
         }
 
+        // 图例
         if (onLegend) {
           let items: LegendItem[] = [];
-          if (dColorMode === "four" && counterFour.size > 0) {
+          if (colorMode === "four" && counterFour.size > 0) {
             items = Array.from(counterFour.entries())
               .map(([k, cnt]) => ({ key: String(k), label: String(k), color: colorForFour(String(k)), count: cnt }))
               .sort((a, b) => b.count - a.count)
@@ -348,89 +369,103 @@ function BuildGraph({
           onLegend(items);
         }
 
+        // 相机复位
         sigma.getCamera().setState({ x: 0, y: 0, ratio: 1 });
         sigma.refresh();
 
-        let usedEdges = 0;
-        let totalEdges = 0;
+        // 暴露调试把手
+        (window as any).PC = { sigma, graph: g };
 
-        if (dShowEdges) {
-          setMsg("加载 /data/edges.csv ...");
-          const t2 = await fetchText("/data/edges.csv", signal);
-          const p2 = Papa.parse<EdgeRow>(t2, { header: true, dynamicTyping: true, skipEmptyLines: true });
-
-          let es = (p2.data || []).filter(Boolean) as EdgeRow[];
-          totalEdges = es.length;
-
-          es = es
-            .map(e => ({ s: resolveSource(e), t: resolveTarget(e), w: resolveWeight(e) }))
-            .filter(e => Number.isFinite(e.w) && e.w >= dMinWeight);
-
-          es = es.filter(e => graph.hasNode(String(e.s)) && graph.hasNode(String(e.t)));
-
-          es.sort((a, b) => b.w - a.w);
-          if (dEdgeLimit > 0 && es.length > dEdgeLimit) es = es.slice(0, dEdgeLimit);
-
-          console.debug("[graph] writing edges:", es.length);
-          let added = 0;
-          for (let i = 0; i < es.length; i += ADD_BATCH) {
-            if (canceled || tokenRef.current !== myToken) return;
-            const batch = es.slice(i, i + ADD_BATCH);
-            setMsg(`写入边 ${i + 1} ~ ${i + batch.length} / ${es.length} ...`);
-            for (const e of batch) {
-              const s = String(e.s);
-              const t = String(e.t);
-              const a = s < t ? s : t;   // 无向边去重
-              const b = s < t ? t : s;
-              if (!graph.hasEdge(a, b)) {
-                const edgeSize = 0.8 + Math.max(0, Math.min(1, e.w)) * 2.4;
-                graph.addEdge(a, b, {
-                  weight: e.w,
-                  size: edgeSize,
-                  color: colorForEdgeWeight(e.w),
-                });
-                added++;
-              }
-            }
-            sigma.refresh();
-            await new Promise(r => setTimeout(r, 0));
-          }
-          usedEdges = added;
-        }
-
-        onStats?.({ totalNodes, usedNodes: graph.order, totalEdges, usedEdges });
-        if (Object.keys(comMap).length === 0 && dColorMode === "community") {
-          setMsg("提示：未检测到 communities.csv（放到 web/public/data 或 web/public/data/graph）");
-          setTimeout(() => setMsg(null), 2400);
-        } else {
-          setMsg(null);
-        }
+        // 统计
+        onStats?.({ totalNodes, usedNodes: g.order, totalEdges: 0, usedEdges: 0 });
+        setMsg(null);
       } catch (e: any) {
-        if (e?.name === "AbortError") return; // 被中断，忽略
         setMsg(`加载/构图失败：${e?.message ?? String(e)}`);
-        console.error(e);
       }
-    }
+    })();
+    return () => { canceled = true; };
+  // 仅在这些变动时重建“节点”
+  }, [sigma, dNodeLimit, baseNodeSize, colorMode, comMap, fourMap, onStats, onLegend]);
 
-    run();
+  /** 颜色模式切换 → 只重染，不重建节点 */
+  useEffect(() => {
+    const g = sigma.getGraph();
+    if (g.order === 0) return;
+    g.forEachNode((n) => {
+      const comm = g.getNodeAttribute(n, "community") as number | null;
+      const four = g.getNodeAttribute(n, "four") as string | null;
+      const col = colorMode === "four" && four ? colorForFour(four) : colorForCommunity(comm);
+      g.setNodeAttribute(n, "color", col);
+    });
+    sigma.refresh();
+  }, [colorMode, sigma]);
 
-    return () => {
-      canceled = true;
-      abortRef.current?.abort();
-    };
-  }, [
-    sigma,
-    dNodeLimit,
-    dEdgeLimit,
-    dMinWeight,
-    dShowEdges,
-    hideEdgesOnMove,
-    baseNodeSize,
-    dColorMode,
-    onStats,
-    onLegend,
-    onCommunityLoad,
-  ]);
+  /** 构建/重建边（不动节点） */
+  useEffect(() => {
+    let canceled = false;
+    (async () => {
+      const g = sigma.getGraph() as Graph;
+
+      // 每次重建边前，先清掉现有边
+      g.clearEdges();
+
+      if (!showEdges) {
+        sigma.refresh();
+        return;
+      }
+
+      try {
+        setMsg("加载 /data/edges.csv ...");
+        const r2 = await fetch("/data/edges.csv", { cache: "no-store" });
+        if (!r2.ok) { setMsg(null); return; } // 没有 edges.csv 也算正常
+        const t2 = await r2.text();
+        const p2 = Papa.parse<EdgeRow>(t2, { header: true, dynamicTyping: true, skipEmptyLines: true });
+
+        let es = (p2.data || []).filter(Boolean) as EdgeRow[];
+        let totalEdges = es.length;
+
+        es = es
+          .map(e => ({ s: resolveSource(e), t: resolveTarget(e), w: resolveWeight(e) }))
+          .filter(e => Number.isFinite(e.w) && e.w >= dMinWeight)
+          .filter(e => g.hasNode(String(e.s)) && g.hasNode(String(e.t)));
+
+        // 权重优先 & 上限
+        es.sort((a, b) => b.w - a.w);
+        if (dEdgeLimit > 0 && es.length > dEdgeLimit) es = es.slice(0, dEdgeLimit);
+
+        let added = 0;
+        for (let i = 0; i < es.length; i += ADD_BATCH) {
+          if (canceled) return;
+          const batch = es.slice(i, i + ADD_BATCH);
+          setMsg(`写入边 ${i + 1} ~ ${i + batch.length} / ${es.length} ...`);
+          for (const e of batch) {
+            const s = String(e.s);
+            const t = String(e.t);
+            const a = s < t ? s : t;
+            const b = s < t ? t : s;
+            if (!g.hasEdge(a, b)) {
+              const edgeSize = 0.8 + Math.max(0, Math.min(1, e.w)) * 2.4;
+              g.addEdge(a, b, {
+                weight: e.w,
+                size: edgeSize,
+                color: colorForEdgeWeight(e.w),
+              });
+              added++;
+            }
+          }
+          sigma.refresh();
+          await new Promise(r => setTimeout(r, 0));
+        }
+
+        onStats?.({ totalNodes: g.order, usedNodes: g.order, totalEdges, usedEdges: added });
+        setMsg(null);
+      } catch (e: any) {
+        setMsg(`加载/构图失败：${e?.message ?? String(e)}`);
+      }
+    })();
+    return () => { canceled = true; };
+  // 仅边相关设置变化时执行
+  }, [sigma, showEdges, dMinWeight, dEdgeLimit, onStats]);
 
   return msg ? <div className="toast" style={{ zIndex: 20 }}>{msg}</div> : null;
 }
@@ -438,15 +473,15 @@ function BuildGraph({
 /** ---------- 页面 ---------- */
 export default function GraphPage() {
   const [nodeLimit, setNodeLimit] = useState<number>(LIMIT_INITIAL_NODES);
-  const [edgeLimit, setEdgeLimit] = useState<number>(LIMIT_INITIAL_EDGES);
+  const [edgeLimit, setEdgeLimit] = useState<number>(12000);
   const [minWeight, setMinWeight] = useState<number>(0.35);
-  const [showEdges, setShowEdges] = useState<boolean>(false); // 默认不画边，避免卡住
+  const [showEdges, setShowEdges] = useState<boolean>(true);
   const [hideEdgesOnMove, setHideEdgesOnMove] = useState<boolean>(true);
   const [stats, setStats] = useState<Stats | null>(null);
 
-  const [nodeScale, setNodeScale] = useState<number>(1.8);
+  const [nodeScale, setNodeScale] = useState<number>(1.6);
   const [edgeScale, setEdgeScale] = useState<number>(1.2);
-  const baseNodeSize = 7.0;
+  const baseNodeSize = 6.0;
 
   const [colorMode, setColorMode] = useState<ColorMode>("community");
   const [legend, setLegend] = useState<LegendItem[]>([]);
@@ -470,6 +505,28 @@ export default function GraphPage() {
     }),
     [showEdges, hideEdgesOnMove]
   );
+
+  /** 调试：把某个社区染红 / 恢复 */
+  function paintCommunity(c: number) {
+    const PC = (window as any).PC;
+    if (!PC?.graph) return;
+    PC.graph.forEachNode((n: string) => {
+      const cc = PC.graph.getNodeAttribute(n, "community");
+      if (cc === c) PC.graph.setNodeAttribute(n, "color", "hsl(0, 82%, 42%)");
+    });
+    PC.sigma.refresh();
+  }
+  function repaintByMode() {
+    const PC = (window as any).PC;
+    if (!PC?.graph) return;
+    PC.graph.forEachNode((n: string) => {
+      const cc = PC.graph.getNodeAttribute(n, "community") as number | null;
+      const ff = PC.graph.getNodeAttribute(n, "four") as string | null;
+      const col = colorMode === "four" && ff ? colorForFour(ff) : colorForCommunity(cc);
+      PC.graph.setNodeAttribute(n, "color", col);
+    });
+    PC.sigma.refresh();
+  }
 
   return (
     <div className="graph-wrap">
@@ -526,9 +583,12 @@ export default function GraphPage() {
           悬停高亮邻居
         </label>
 
+        <button className="chip" onClick={() => paintCommunity(17)}>测试：把社区 17 染红</button>
+        <button className="chip" onClick={repaintByMode}>清除测试颜色（重染）</button>
+
         {commCount === 0 && colorMode === "community" && (
           <div className="badge" style={{ background: "#fef3c7", borderColor: "#fde68a" }}>
-            未检测到 communities.csv（放到 web/public/data 或 web/public/data/graph）
+            未检测到 communities.csv（放到 web/public/data）
           </div>
         )}
 
@@ -559,7 +619,7 @@ export default function GraphPage() {
           showEdges={showEdges}
           hideEdgesOnMove={hideEdgesOnMove}
           onStats={setStats}
-          baseNodeSize={baseNodeSize}
+          baseNodeSize={6.0}
           colorMode={colorMode}
           onLegend={setLegend}
           onCommunityLoad={setCommCount}
