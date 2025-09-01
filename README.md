@@ -1,7 +1,7 @@
 # paper-community
 
 <p align="center">
-  <a href="https://github.com/你的组织或用户名/paper-community">
+  <a href="https://github.com/Gimmnm/paper-community">
     <img src="web/public/pic/logo.svg" alt="Paper Community" height="96">
   </a>
 </p>
