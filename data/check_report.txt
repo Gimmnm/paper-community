@@ -1,0 +1,109 @@
+================================================================================
+MODEL CHECK REPORT
+================================================================================
+n_authors(list) = 47311
+n_papers(list)  = 83331
+n_authors(data) = 47311
+n_papers(data)  = 83331
+
+--------------------------------------------------------------------------------
+A) Basic text fields quality
+--------------------------------------------------------------------------------
+empty titles    : 0 / 83331 (0.0000%)
+empty abstracts : 1904 / 83331 (2.2849%)
+author names containing '`t' : 1 / 47311 (0.0021%)
+
+--------------------------------------------------------------------------------
+B) Year field quality
+--------------------------------------------------------------------------------
+year=0 (unknown): 0 / 83331 (0.0000%)
+year min/max    : 1975 / 2015
+
+--------------------------------------------------------------------------------
+C) Edge counts & validity
+--------------------------------------------------------------------------------
+sum(A.paper) edges  = 173799
+sum(P.author) edges = 173799
+invalid paper ids in authors[*].paper : 0
+invalid author ids in papers[*].author: 0
+duplicate entries in authors[*].paper lists: 0 authors
+duplicate entries in papers[*].author lists : 0 papers
+
+total ref edges      : 522053
+invalid ref ids       : 0
+self-ref edges (pid->pid): 0
+duplicate entries in ref lists: 0 papers
+
+--------------------------------------------------------------------------------
+D) Degree distributions
+--------------------------------------------------------------------------------
+papers_per_author: n=47311, min=1, max=435, mean=3.674, median=1
+  p10=1, p25=1, p75=3, p90=8
+  top5 (value x freq): 1x26155, 2x7304, 3x3489, 4x2095, 5x1462
+
+authors_per_paper: n=83331, min=1, max=33, mean=2.086, median=2
+  p10=1, p25=1, p75=3, p90=3
+  top5 (value x freq): 2x33996, 1x26530, 3x15930, 4x4652, 5x1334
+
+refs_per_paper: n=83331, min=0, max=489, mean=6.265, median=4
+  p10=0, p25=2, p75=9, p90=15
+  top5 (value x freq): 0x11267, 1x9191, 2x8111, 3x7201, 4x6341
+
+
+--------------------------------------------------------------------------------
+E) Sampled deep consistency checks
+--------------------------------------------------------------------------------
+seed=42, sampled_authors=80, sampled_papers=120
+sampled membership checks: 532
+sampled inconsistencies  : 0
+
+--------------------------------------------------------------------------------
+F) Top examples
+--------------------------------------------------------------------------------
+Top authors by paper_count:
+  aid=15409  papers=  435  name=Peter Hall
+  aid= 2040  papers=  295  name=Narayanaswamy Balakrishnan
+  aid= 5525  papers=  216  name=Raymond Carroll
+  aid= 9466  papers=  187  name=Holger Dette
+  aid=17976  papers=  165  name=Joseph Ibrahim
+  aid=36242  papers=  161  name=Pranab Kumar Sen
+  aid=27905  papers=  144  name=Geert Molenberghs
+  aid=47087  papers=  138  name=Lixing Zhu
+  aid=10445  papers=  128  name=David Dunson
+  aid=28457  papers=  125  name=Rahul Mukerjee
+
+Top papers by out-ref count:
+  pid=83276  out_refs= 489  title=Bayesian Statistics In Medicine: A 25 Year Review
+  pid= 7633  out_refs= 343  title=Biometrika Highlights From Volume 28 Onwards
+  pid=82775  out_refs= 177  title=Semiparametric Regression During 2003-2007
+  pid=49818  out_refs= 132  title=Estimation Of Diagnostic Test Accuracy Without Full Verification: A Review Of La
+  pid=83273  out_refs= 122  title=Recent Developments In Meta-analysis
+  pid=47361  out_refs= 108  title=Modelling Ordered Categorical Data: Recent Advances And Future Challenges
+  pid=54980  out_refs=  92  title=A Unified View Of The Theory Of Directional Statistics, 1975-1988
+  pid=83315  out_refs=  92  title=Nonparametric Bayesian Data Analysis
+  pid=83301  out_refs=  86  title=High-breakdown Robust Multivariate Methods
+  pid=83209  out_refs=  82  title=Recent Developments In The Methods Of Optimum And Related Experimental-designs
+
+Random paper samples (title + first 200 chars of abstract):
+  pid=58083 | year=1995 | title=Nonparametric-tests For Ordered C-sample Contaminated Distributions
+       abstract[:200]=In this paper, we propose and study a c-sample rank test for ordered   alternatives when the underlying distributions have a contaminated   component. We obtain the asymptotic distributions under loca
+  pid=72133 | year=2005 | title=Multivariate Poisson Regression With Covariance Structure
+       abstract[:200]=In recent years the applications of multivariate Poisson models have   increased, mainly because of the gradual increase in computer   performance. The multivariate Poisson model used in practice is b
+  pid=12834 | year=2013 | title=Extremal Dependence Of Copulas: A Tail Density Approach
+       abstract[:200]=The extremal dependence of a random vector describes the tail behaviors   of joint probabilities of the random vector with respect to that of its   margins, and has been often studied by using the tai
+  pid=6631 | year=1985 | title=Odds Ratio Inference With Dependent Data
+       abstract[:200]=When data can be presented as a series of k 2×2 tables with cell counts (xi ,ni−xi, yi, mi−yi), it is often assumed that xi and yi are binomially distributed. This paper deals with inference for the c
+  pid=70856 | year=1996 | title=The Uniqueness Of [87,5,57;3]-codes And The Nonexistence Of [258,6,171;3]-codes
+       abstract[:200]=Recently, Hamada et al. (Des. Codes Cryptography (1992) 2, 225-229)   showed that there exists an [87, 5, 57; 3]-code meeting the Griesmer   bound. But it is unknown whether or not an [87, 5, 57; 3]-c
+
+Examples: empty abstract but non-empty title (for title-fallback embedding):
+  pid=217 year=2012 title=Analyses That Inform Policy Decisions
+  pid=305 year=2012 title=Optimal Bayesian Enrichment: A View From The Closet
+  pid=1551 year=2002 title=Rationale And Applicability Of Analysis Methods For Identification Of Chromosomal Fragile Sites - A Reply To Drs Dahm Et Al.
+  pid=2058 year=1999 title=Evolution And Biometry
+  pid=2824 year=1993 title=A Note On The Operating Characteristics Of The Modified-f Test - Response
+
+--------------------------------------------------------------------------------
+G) Issues / Warnings
+--------------------------------------------------------------------------------
+No blocking issues found.

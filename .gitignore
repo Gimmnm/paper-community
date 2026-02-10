@@ -53,7 +53,7 @@ data/*_layout*.csv
 data/*_coords*.csv
 
 # 如果 embeddings 是从上游项目产出的，也建议忽略：
-data/embeddings*.npy
-data/embeddings*.npz
+# data/embeddings*.npy
+# data/embeddings*.npz
 
 node_modules/

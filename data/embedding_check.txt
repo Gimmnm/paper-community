@@ -1,0 +1,91 @@
+================================================================================
+EMBEDDING CHECK REPORT
+================================================================================
+embs.shape      = (83332, 768)
+embs.dtype      = float32
+len(papers)     = 83332
+expected_dim    = 768
+
+indexing mode   = 1-based
+real paper rows = 83331
+
+norm(embs[0])   = 0.000000  (1-based 占位行通常应为 0)
+
+--------------------------------------------------------------------------------
+A) Numeric health
+--------------------------------------------------------------------------------
+NaN count       : 0
+Inf count       : 0
+zero-vector rows: 0 / 83331
+
+--------------------------------------------------------------------------------
+B) Norm distribution (L2)
+--------------------------------------------------------------------------------
+norm min/max    : 21.3149 / 22.6037
+norm mean/std   : 21.8915 / 0.1437
+p01           : 21.5790
+p05           : 21.6656
+p10           : 21.7125
+p25           : 21.7926
+p50           : 21.8855
+p75           : 21.9847
+p90           : 22.0778
+p95           : 22.1374
+p99           : 22.2513
+
+--------------------------------------------------------------------------------
+C) Random samples (paper fields + embedding preview)
+--------------------------------------------------------------------------------
+pid=14593 | norm=22.0709 | title_len=81 | has_abs=True
+  title   : The Number Of Points Of An Empirical Or Poisson Process Covered By Unions Of Sets
+  abs[:120]: For the d-dimensional empirical process and the d-dimensional   homogeneous Poisson process we give weak laws for the ma
+  vec[:5]  : [0.44464796781539917, 0.47238823771476746, -0.8756057024002075, 0.41960111260414124, -0.585396945476532]
+
+pid=3279 | norm=22.0243 | title_len=38 | has_abs=True
+  title   : Modeling Insect Natality Using Splines
+  abs[:120]: We present methodology for analyzing age-specific birth rates, with particular emphasis on describing variability within
+  vec[:5]  : [0.08416259288787842, 0.7338023781776428, -0.8944438099861145, -0.3698929250240326, 0.16920404136180878]
+
+pid=36049 | norm=21.9807 | title_len=82 | has_abs=True
+  title   : Correcting Size Distortion Of The Dickey-fuller Test Via Recursive Mean Adjustment
+  abs[:120]: Leybourne et al. (J. Econom. 87 (1998) 191) have shown the Dickey-Fuller   (J. Amer. Statist. Assoc. 74 (1979) 427) unit
+  vec[:5]  : [0.20201224088668823, 0.9483401775360107, -0.4595901668071747, 0.14526143670082092, -0.47744765877723694]
+
+pid=32099 | norm=21.8434 | title_len=65 | has_abs=True
+  title   : Another Characterization Of The Type-i Extreme Value Distribution
+  abs[:120]: Abstract The linear-drift Gumbel record (ldGr) model is defined as Yn = Xn + cn, n = 1, 2,..., and c > 0 where {Xn} is i
+  vec[:5]  : [0.05667426437139511, 0.3711473047733307, -0.9820619821548462, -0.1714387834072113, 0.14201873540878296]
+
+pid=29257 | norm=22.1610 | title_len=98 | has_abs=True
+  title   : Lamperti Transformation For Continuous-state Branching Processes With Competition And Applications
+  abs[:120]: The Lamperti transformation is established between continuous-state   branching processes (CB-processes) with competitio
+  vec[:5]  : [-0.04410100728273392, -0.08135278522968292, -0.9484246373176575, 0.6642208099365234, -0.18858075141906738]
+
+pid=18290 | norm=21.9505 | title_len=123 | has_abs=True
+  title   : On Wielandt Inequality And Its Application To The Asymptotic-distribution Of The Eigenvalues Of A Random Symmetrical Mat
+  abs[:120]: A relatively obscure eigenvalue inequality due to Wielandt is used to   give a simple derivation of the asymptotic distr
+  vec[:5]  : [0.30409812927246094, 0.6611618399620056, -0.7285423278808594, -0.009569674730300903, -0.3148394823074341]
+
+pid=13435 | norm=21.8349 | title_len=75 | has_abs=True
+  title   : Testing The Equality Of Error Distributions From K Independent Garch Models
+  abs[:120]: In this paper we study the problem of testing the null hypothesis that   errors from k independent parametrically specif
+  vec[:5]  : [-0.2412327080965042, 0.6482486724853516, -0.5390301942825317, -0.10139686614274979, -0.44191256165504456]
+
+pid=71483 | norm=21.6086 | title_len=91 | has_abs=True
+  title   : A Closer Look At Testing The ``no-treatment-effect'' Hypothesis In A Comparative Experiment
+  abs[:120]: Standard tests of the ``no-treatment-effect'' hypothesis for a   comparative experiment include permutation tests, the W
+  vec[:5]  : [0.5815237164497375, 0.37081149220466614, -0.7882978916168213, 0.2405339777469635, -0.3467976748943329]
+
+--------------------------------------------------------------------------------
+D) Random pair cosine similarity sanity check
+--------------------------------------------------------------------------------
+cos(pid 11396, 77398) = 0.810318
+cos(pid 55303, 4166) = 0.858647
+cos(pid 3906, 12281) = 0.844829
+cos(pid 28658, 30496) = 0.848412
+cos(pid 66238, 78908) = 0.889754
+cos(pid 3479, 73564) = 0.843221
+
+E) Summary
+--------------------------------------------------------------------------------
+No blocking issues if: NaN/Inf=0, dim correct, zero rows minimal, norms in a reasonable range.
