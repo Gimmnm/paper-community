@@ -42,8 +42,8 @@ data/graph/**
 !data/graph/.gitkeep          # 保留空目录的占位文件
 
 # 评测/可视化等输出
-outputs/**
-!outputs/.gitkeep
+out/**
+!out/.gitkeep
 
 # 各类中间文件（按需保留/忽略）
 data/*.npy
@@ -53,7 +53,5 @@ data/*_layout*.csv
 data/*_coords*.csv
 
 # 如果 embeddings 是从上游项目产出的，也建议忽略：
-# data/embeddings*.npy
-# data/embeddings*.npz
-
-node_modules/
+data/embeddings*.npy
+data/embeddings*.npz
