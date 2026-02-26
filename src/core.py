@@ -24,8 +24,9 @@ from diagram2d import embed_2d, plot_scatter, graph_layout_2d
 
 
 # 你给定的目录（绝对路径）
-DATA_DIR = Path("/Users/gzh/Documents/paper-community/data")
-OUT_DIR = Path("/Users/gzh/Documents/paper-community/out")
+BASE_DIR = Path(__file__).resolve().parent.parent  
+DATA_DIR = BASE_DIR / "data"
+OUT_DIR = BASE_DIR / "out"
 
 # 四个数据源路径
 AUTHOR_NAME_TXT = DATA_DIR / "author_name.txt"
