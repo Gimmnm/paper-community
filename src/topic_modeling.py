@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 """
-基于 Leiden 社区结果的全局主题建模（Topic-SCORE / SCORE 风格）
+基于 Leiden 社区结果的全局主题建模（Topic-SCORE ）
 =====================================================
 
 目标：
 - 从 data_store.pkl 读取论文标题/作者/摘要
 - 按社区（如 membership_r1.0000.npy）聚合文本，构造 社区-词 矩阵 D（词 x 社区）
 - 参考 preprocessing.R 做停用词与频次过滤
-- 参考 score_functions.R / 《Using SVD for Topic Modeling》做谱方法主题建模
-- 在全局设定 K 个主题下，为每个社区估计 K 维主题权重（Top1 / Top2）
+- 参考 score_functions.R 做谱方法主题建模
+- 在全局设定 K 个主题下，为每个社区估计 K 维主题权重
 - 输出主题词、社区主题权重、社区标签等结果文件
 
-默认适配你的项目目录结构：
+默认适配的项目目录结构：
 project/
 ├── data/
 │   ├── stopwords.txt
@@ -32,7 +32,7 @@ python src/topic_modeling.py --k 10 --membership out/leiden_sweep/membership_r1.
 
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from typing import Iterable, Sequence
 import argparse
 import json
@@ -51,7 +51,7 @@ from sklearn.cluster import KMeans
 
 
 # -----------------------------
-# 路径默认值（与 core.py 保持一致风格）
+# 路径默认值
 # -----------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -203,9 +203,9 @@ def build_community_term_matrix(
     paper_abs = data["paper_abstract_clean"] if cfg.use_clean_abstract else data["paper_abstract"]
 
     # 社区统计
-    comm_sizes = Counter(int(c) for c in membership.tolist())
-    valid_comms = sorted([c for c, sz in comm_sizes.items() if sz >= cfg.min_community_size])
-    valid_set = set(valid_comms)
+    comm_sizes = Counter(int(c) for c in membership.tolist()) #每个社区的论文数量
+    valid_comms = sorted([c for c, sz in comm_sizes.items() if sz >= cfg.min_community_size]) #过滤出 “有效社区”（论文数≥cfg.min_community_size），并排序
+    valid_set = set(valid_comms) #构建 “社区 ID→该社区下论文 ID 列表” 的映射（仅保留有效社区）
 
     paper_ids_by_comm: dict[int, list[int]] = defaultdict(list)
     for pid in range(1, n_papers + 1):
@@ -213,10 +213,10 @@ def build_community_term_matrix(
         if c in valid_set:
             paper_ids_by_comm[c].append(pid)
 
-    # author token cache（加速）
+    # author token cache（加速），初始化作者名分词缓存字典，同一作者名只需分词 1 次
     author_token_cache: dict[int, list[str]] = {}
 
-    # 聚合到每个社区 Counter
+    # 聚合到每个社区 Counter（词频计数器）
     comm_counters: dict[int, Counter] = {c: Counter() for c in valid_comms}
     comm_token_counts: dict[int, int] = {c: 0 for c in valid_comms}
     global_token_sum = Counter()
@@ -524,7 +524,7 @@ def estimate_A_topic_score(D_fit: sparse.csr_matrix, cfg: TopicScoreConfig) -> t
     row_scale = 1.0 / np.sqrt(M_trunk)
     X = D_fit.multiply(row_scale[:, None]).astype(np.float64)
 
-    # SVD
+    # 对 X 做截断 SVD（取前 K 个奇异值）
     Xi, svals, _ = _sorted_svds_u(X, k=K, seed=cfg.seed)
 
     # Step 1: SCORE ratio normalization
@@ -685,12 +685,409 @@ def top_words_per_topic(A_hat: np.ndarray, vocab: Sequence[str], topn: int = 15)
     return out
 
 
+
+def _paper_title_str(paper_title: Sequence[str], pid: int) -> str:
+    try:
+        s = str(paper_title[pid]).strip()
+    except Exception:
+        s = ""
+    return s if s else f"[PID {int(pid)}]"
+
+
+def _paper_year_int(paper_year: Sequence[int] | None, pid: int) -> int:
+    if paper_year is None:
+        return -10**9
+    try:
+        return int(paper_year[pid])
+    except Exception:
+        return -10**9
+
+
+def _build_internal_undirected_citation_graph(
+    pids: Sequence[int],
+    paper_refs: Sequence[Sequence[int]] | None,
+) -> tuple[dict[int, set[int]], int]:
+    """
+    在社区内构建“论文-论文”无向子图（基于引用边，忽略方向）：
+    - 若 pid 引用 q，且 q 也在该社区，则加入无向边 {pid, q}
+    - 返回 adjacency dict 与无向边数 m
+    """
+    pid_set = set(int(pid) for pid in pids)
+    adj: dict[int, set[int]] = {int(pid): set() for pid in pid_set}
+    if not pid_set or paper_refs is None:
+        return adj, 0
+
+    n_refs = len(paper_refs)
+    for pid in pid_set:
+        if pid < 0 or pid >= n_refs:
+            continue
+        refs = paper_refs[pid]
+        if refs is None:
+            continue
+        for q in refs:
+            try:
+                q = int(q)
+            except Exception:
+                continue
+            if q == pid or q not in pid_set:
+                continue
+            adj[pid].add(q)
+            adj[q].add(pid)
+
+    m_undirected = int(sum(len(v) for v in adj.values()) // 2)
+    return adj, m_undirected
+
+
+def _brandes_betweenness_unweighted_undirected(adj: dict[int, set[int]]) -> dict[int, float]:
+    """
+    无权无向图的 Brandes 介数中心性（exact）。
+    返回 raw betweenness（未做归一化）；用于社区内排序足够。
+    """
+    nodes = list(adj.keys())
+    cb = {v: 0.0 for v in nodes}
+    for s in nodes:
+        stack: list[int] = []
+        pred: dict[int, list[int]] = {w: [] for w in nodes}
+        sigma: dict[int, float] = {w: 0.0 for w in nodes}
+        dist: dict[int, int] = {w: -1 for w in nodes}
+        sigma[s] = 1.0
+        dist[s] = 0
+
+        q = deque([s])
+        while q:
+            v = q.popleft()
+            stack.append(v)
+            dv = dist[v]
+            sv = sigma[v]
+            for w in adj[v]:
+                if dist[w] < 0:
+                    q.append(w)
+                    dist[w] = dv + 1
+                if dist[w] == dv + 1:
+                    sigma[w] += sv
+                    pred[w].append(v)
+
+        delta: dict[int, float] = {w: 0.0 for w in nodes}
+        while stack:
+            w = stack.pop()
+            sw = sigma[w]
+            if sw > 0:
+                coeff = (1.0 + delta[w]) / sw
+                for v in pred[w]:
+                    delta[v] += sigma[v] * coeff
+            if w != s:
+                cb[w] += delta[w]
+
+    for v in cb:
+        cb[v] *= 0.5  # 无向图每条路径计数两次
+    return cb
+
+
+def _closeness_centrality_unweighted(adj: dict[int, set[int]]) -> dict[int, float]:
+    """
+    社区内无向图的 closeness（含断开图惩罚，近似 NetworkX wf_improved 风格）：
+    closeness(u) = ((reachable-1)/(N-1)) * (reachable-1)/sum_dist
+    孤立点返回 0。
+    """
+    nodes = list(adj.keys())
+    n = len(nodes)
+    if n == 0:
+        return {}
+
+    closeness: dict[int, float] = {}
+    for s in nodes:
+        dist = {s: 0}
+        q = deque([s])
+        while q:
+            v = q.popleft()
+            for w in adj[v]:
+                if w not in dist:
+                    dist[w] = dist[v] + 1
+                    q.append(w)
+
+        reachable = len(dist)
+        if reachable <= 1:
+            closeness[s] = 0.0
+            continue
+        tot = float(sum(dist.values()))
+        if tot <= 0:
+            closeness[s] = 0.0
+            continue
+        val = (reachable - 1.0) / tot
+        if n > 1:
+            val *= (reachable - 1.0) / (n - 1.0)
+        closeness[s] = float(val)
+
+
+    return closeness
+
+
+def _approx_closeness_from_landmarks_unweighted(
+    adj: dict[int, set[int]],
+    *,
+    n_landmarks: int = 16,
+    seed: int = 42,
+) -> dict[int, float]:
+    """
+    用少量 landmark BFS 近似 closeness（用于超大社区加速）。
+    思路：采样若干源点做 BFS，累计每个节点到这些源点的距离，按可达比例做惩罚。
+    返回值仅用于社区内排序（不追求与 NetworkX 数值完全一致）。
+    """
+    nodes = list(adj.keys())
+    N = len(nodes)
+    if N == 0:
+        return {}
+    if N == 1:
+        return {int(nodes[0]): 0.0}
+
+    n_landmarks = max(1, min(int(n_landmarks), N))
+    rng = np.random.default_rng(seed)
+
+    # 混合采样：一半高 degree，一半随机，兼顾稳定性与覆盖
+    deg_sorted = sorted(nodes, key=lambda u: (-len(adj.get(u, ())), int(u)))
+    n_deg = min(len(deg_sorted), max(1, n_landmarks // 2))
+    chosen = list(deg_sorted[:n_deg])
+
+    remaining = [u for u in nodes if u not in set(chosen)]
+    if len(chosen) < n_landmarks and remaining:
+        take = min(n_landmarks - len(chosen), len(remaining))
+        idx = rng.choice(len(remaining), size=take, replace=False)
+        chosen.extend([remaining[int(i)] for i in np.atleast_1d(idx)])
+
+    # 累计“到 landmarks 的距离和”与“被多少 landmarks 可达”
+    dist_sum: dict[int, float] = {int(u): 0.0 for u in nodes}
+    seen_cnt: dict[int, int] = {int(u): 0 for u in nodes}
+
+    for s in chosen:
+        q = deque([s])
+        dist = {int(s): 0}
+        while q:
+            u = q.popleft()
+            du = dist[u]
+            for v in adj.get(u, ()):
+                if v not in dist:
+                    dist[v] = du + 1
+                    q.append(v)
+
+        for u, d in dist.items():
+            dist_sum[int(u)] += float(d)
+            seen_cnt[int(u)] += 1
+
+    out: dict[int, float] = {}
+    L = len(chosen)
+    for u in nodes:
+        u = int(u)
+        cnt = int(seen_cnt.get(u, 0))
+        if cnt <= 0:
+            out[u] = 0.0
+            continue
+        mean_d = float(dist_sum[u]) / float(cnt) if cnt > 0 else math.inf
+        if not np.isfinite(mean_d) or mean_d <= 0:
+            out[u] = 0.0
+            continue
+        # 可达比例惩罚（近似）
+        out[u] = (cnt / max(1, L)) * (1.0 / mean_d)
+    return out
+
+
+def _sort_pids_by_score(
+
+    pids: Sequence[int],
+    scores: dict[int, float],
+    paper_year: Sequence[int] | None,
+) -> list[int]:
+    return sorted(
+        [int(pid) for pid in pids],
+        key=lambda pid: (
+            -float(scores.get(int(pid), 0.0)),
+            -_paper_year_int(paper_year, int(pid)),
+            int(pid),
+        )
+    )
+
+
+def _select_representative_papers_by_centrality(
+    pids: Sequence[int],
+    paper_refs: Sequence[Sequence[int]] | None,
+    paper_year: Sequence[int] | None,
+    *,
+    n_betweenness: int = 2,
+    n_closeness: int = 1,
+    mode: str = "approx",
+    exact_betweenness_max_nodes: int = 400,
+) -> dict:
+    """
+    为一个社区选代表论文（论文网络版本）：
+    - 关键桥梁文献：介数中心性最高的 n_betweenness 篇
+    - 核心文献：接近中心性最高的 n_closeness 篇
+    图定义：社区内引用子图，按无向图处理（忽略引用方向）。
+
+    性能说明：
+    - 小社区：exact betweenness + exact closeness
+    - 大社区：approx betweenness（NetworkX采样）+ approx closeness（landmark BFS）
+    """
+    pids = [int(pid) for pid in pids]
+    mode = str(mode).strip().lower()
+    if mode not in {"exact", "approx", "off"}:
+        mode = "approx"
+
+    if mode == "off":
+        if not pids:
+            return {
+                "betweenness_top_pids": [],
+                "closeness_top_pids": [],
+                "combined_unique_pids": [],
+                "betweenness_scores": {},
+                "closeness_scores": {},
+                "graph_n_nodes": 0,
+                "graph_n_edges": 0,
+                "betweenness_mode": "off",
+            }
+        fallback = sorted(pids, key=lambda pid: (-_paper_year_int(paper_year, pid), int(pid)))
+        btw_top = fallback[:max(0, int(n_betweenness))]
+        cls_top = fallback[:max(0, int(n_closeness))]
+        combined: list[int] = []
+        for pid in (btw_top + cls_top):
+            if pid not in combined:
+                combined.append(int(pid))
+        zero_btw = {int(pid): 0.0 for pid in pids}
+        zero_cls = {int(pid): 0.0 for pid in pids}
+        return {
+            "betweenness_top_pids": btw_top,
+            "closeness_top_pids": cls_top,
+            "combined_unique_pids": combined,
+            "betweenness_scores": zero_btw,
+            "closeness_scores": zero_cls,
+            "graph_n_nodes": int(len(pids)),
+            "graph_n_edges": 0,
+            "betweenness_mode": "off_fallback_year_sort",
+        }
+
+    if not pids:
+        return {
+            "betweenness_top_pids": [],
+            "closeness_top_pids": [],
+            "combined_unique_pids": [],
+            "betweenness_scores": {},
+            "closeness_scores": {},
+            "graph_n_nodes": 0,
+            "graph_n_edges": 0,
+            "betweenness_mode": "empty",
+        }
+
+    adj, m_edges = _build_internal_undirected_citation_graph(pids, paper_refs)
+    n_nodes = len(adj)
+
+    if n_nodes <= 1 or m_edges <= 0:
+        fallback = sorted(pids, key=lambda pid: (-_paper_year_int(paper_year, pid), int(pid)))
+        btw_top = fallback[:max(0, int(n_betweenness))]
+        cls_top = fallback[:max(0, int(n_closeness))]
+        combined: list[int] = []
+        for pid in (btw_top + cls_top):
+            if pid not in combined:
+                combined.append(int(pid))
+        zero_btw = {int(pid): 0.0 for pid in pids}
+        zero_cls = {int(pid): 0.0 for pid in pids}
+        return {
+            "betweenness_top_pids": btw_top,
+            "closeness_top_pids": cls_top,
+            "combined_unique_pids": combined,
+            "betweenness_scores": zero_btw,
+            "closeness_scores": zero_cls,
+            "graph_n_nodes": int(n_nodes),
+            "graph_n_edges": int(m_edges),
+            "betweenness_mode": "fallback_no_edges",
+        }
+
+    # --- betweenness ---
+    betweenness_mode = "exact_brandes"
+    if mode == "exact":
+        betweenness_scores = _brandes_betweenness_unweighted_undirected(adj)
+        betweenness_mode = "exact_brandes_forced"
+    else:
+        if n_nodes > int(exact_betweenness_max_nodes):
+            try:
+                import networkx as nx
+                G = nx.Graph()
+                G.add_nodes_from(adj.keys())
+                for u, nbrs in adj.items():
+                    for v in nbrs:
+                        if u < v:
+                            G.add_edge(u, v)
+
+                # 大图时降低采样数；否则在低分辨率巨型社区会非常慢
+                if n_nodes >= 50000:
+                    k_sample = 8
+                elif n_nodes >= 20000:
+                    k_sample = 12
+                elif n_nodes >= 8000:
+                    k_sample = 16
+                elif n_nodes >= 3000:
+                    k_sample = 24
+                else:
+                    k_sample = min(48, n_nodes)
+
+                betweenness_scores = {
+                    int(k): float(v)
+                    for k, v in nx.betweenness_centrality(G, k=int(k_sample), normalized=False, seed=42).items()
+                }
+                for pid in adj.keys():
+                    betweenness_scores.setdefault(int(pid), 0.0)
+                betweenness_mode = f"approx_nx_k{int(k_sample)}"
+            except Exception:
+                betweenness_scores = _brandes_betweenness_unweighted_undirected(adj)
+                betweenness_mode = "exact_brandes_fallback"
+        else:
+            betweenness_scores = _brandes_betweenness_unweighted_undirected(adj)
+
+    # --- closeness ---
+    # exact closeness 是“每个节点做一次 BFS”，对低分辨率巨型社区会卡很久
+    if mode == "exact":
+        closeness_scores = _closeness_centrality_unweighted(adj)
+        closeness_mode = "exact_bfs_all_nodes_forced"
+    else:
+        if n_nodes >= 12000:
+            closeness_scores = _approx_closeness_from_landmarks_unweighted(adj, n_landmarks=12, seed=42)
+            closeness_mode = "approx_landmark12"
+        elif n_nodes >= 5000:
+            closeness_scores = _approx_closeness_from_landmarks_unweighted(adj, n_landmarks=16, seed=42)
+            closeness_mode = "approx_landmark16"
+        elif n_nodes >= 2000:
+            closeness_scores = _approx_closeness_from_landmarks_unweighted(adj, n_landmarks=24, seed=42)
+            closeness_mode = "approx_landmark24"
+        else:
+            closeness_scores = _closeness_centrality_unweighted(adj)
+            closeness_mode = "exact_bfs_all_nodes"
+
+    btw_ranked = _sort_pids_by_score(pids, betweenness_scores, paper_year)
+    cls_ranked = _sort_pids_by_score(pids, closeness_scores, paper_year)
+
+    btw_top = btw_ranked[:max(0, int(n_betweenness))]
+    cls_top = cls_ranked[:max(0, int(n_closeness))]
+
+    combined: list[int] = []
+    for pid in (btw_top + cls_top):
+        if pid not in combined:
+            combined.append(int(pid))
+
+    return {
+        "betweenness_top_pids": btw_top,
+        "closeness_top_pids": cls_top,
+        "combined_unique_pids": combined,
+        "betweenness_scores": {int(k): float(v) for k, v in betweenness_scores.items()},
+        "closeness_scores": {int(k): float(v) for k, v in closeness_scores.items()},
+        "graph_n_nodes": int(n_nodes),
+        "graph_n_edges": int(m_edges),
+        "betweenness_mode": f"{betweenness_mode}+{closeness_mode}",
+    }
+
 def build_community_summary_tables(
     data: dict,
     matrix_res: MatrixBuildResult,
     topic_res: TopicScoreResult,
     topn_words: int = 10,
     topn_papers: int = 5,
+    rep_papers_mode: str = "approx",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     vocab = matrix_res.vocab
     community_ids = matrix_res.community_ids_all
@@ -714,21 +1111,43 @@ def build_community_summary_tables(
     comm_rows = []
     paper_title = data["paper_title"]
     paper_year = data.get("paper_year", None)
+    paper_refs = data.get("paper_refs", None)
 
+    n_comms_total = len(community_ids)
+    t_comm_progress = time.time()
     for j, c in enumerate(community_ids.tolist()):
+        if (j == 0) or ((j + 1) % 20 == 0) or (j + 1 == n_comms_total):
+            print(f"[topic_model] summary centrality progress: {j+1}/{n_comms_total} communities")
         w = W[:, j]
         order = np.argsort(w)[::-1]
         t1 = int(order[0])
         t2 = int(order[1]) if K >= 2 else int(order[0])
 
-        # 取若干代表论文（这里先按年份新->旧，再标题；你后续可换成中心性）
+        # 代表论文：社区内引用子图中心性（桥梁=介数前2；核心=接近前1）
         pids = matrix_res.paper_ids_by_comm.get(int(c), [])
-        if paper_year is not None:
-            pids_sorted = sorted(pids, key=lambda pid: (int(paper_year[pid]), pid), reverse=True)
-        else:
-            pids_sorted = pids[:]
-        reps = pids_sorted[:topn_papers]
-        rep_titles = [str(paper_title[pid]).strip() for pid in reps]
+        _t_cent0 = time.time()
+        cent = _select_representative_papers_by_centrality(
+            pids=pids,
+            paper_refs=paper_refs,
+            paper_year=paper_year,
+            n_betweenness=2,
+            n_closeness=1,
+            mode=rep_papers_mode,
+        )
+        if len(pids) >= 2000:
+            print(
+                f"[topic_model]   community {int(c)} centrality done: "
+                f"papers={len(pids)}, graph=({cent['graph_n_nodes']} nodes, {cent['graph_n_edges']} edges), "
+                f"mode={cent['betweenness_mode']}, dt={time.time()-_t_cent0:.1f}s"
+            )
+
+        reps = cent["combined_unique_pids"][:max(0, int(topn_papers))]  # 一般为 2~3 篇（去重后）
+        rep_titles = [_paper_title_str(paper_title, pid) for pid in reps]
+
+        btw_pids = cent["betweenness_top_pids"]
+        cls_pids = cent["closeness_top_pids"]
+        btw_titles = [_paper_title_str(paper_title, pid) for pid in btw_pids]
+        cls_titles = [_paper_title_str(paper_title, pid) for pid in cls_pids]
 
         row = {
             "community_id": int(c),
@@ -741,8 +1160,33 @@ def build_community_summary_tables(
             "top2_weight": float(w[t2]),
             "top2_keywords": " ".join([x[0] for x in top_words[t2][:6]]),
             "community_label": f"T{t1}:{' '.join([x[0] for x in top_words[t1][:4]])} | T{t2}:{' '.join([x[0] for x in top_words[t2][:4]])}",
+
+            # 兼容旧字段：名字不变，内容改成中心性代表论文
             "rep_papers": " || ".join(rep_titles),
+
+            # 新增字段：显式区分桥梁/核心文献
+            "rep_papers_method": "intra_community_citation_centrality (betweenness_top2 + closeness_top1; undirected)",
+            "bridge_papers_betweenness": " || ".join(btw_titles),
+            "core_papers_closeness": " || ".join(cls_titles),
+            "bridge_paper_ids_betweenness": ",".join(str(int(pid)) for pid in btw_pids),
+            "core_paper_ids_closeness": ",".join(str(int(pid)) for pid in cls_pids),
+            "centrality_graph_nodes": int(cent["graph_n_nodes"]),
+            "centrality_graph_edges": int(cent["graph_n_edges"]),
+            "betweenness_mode": str(cent["betweenness_mode"]),
         }
+
+        # 细粒度调试/核查列（便于人工确认）
+        for idx, pid in enumerate(btw_pids, start=1):
+            row[f"bridge_paper_{idx}_id"] = int(pid)
+            row[f"bridge_paper_{idx}_year"] = int(_paper_year_int(paper_year, int(pid)))
+            row[f"bridge_paper_{idx}_title"] = _paper_title_str(paper_title, int(pid))
+            row[f"bridge_paper_{idx}_betweenness"] = float(cent["betweenness_scores"].get(int(pid), 0.0))
+        for idx, pid in enumerate(cls_pids, start=1):
+            row[f"core_paper_{idx}_id"] = int(pid)
+            row[f"core_paper_{idx}_year"] = int(_paper_year_int(paper_year, int(pid)))
+            row[f"core_paper_{idx}_title"] = _paper_title_str(paper_title, int(pid))
+            row[f"core_paper_{idx}_closeness"] = float(cent["closeness_scores"].get(int(pid), 0.0))
+
         for k in range(K):
             row[f"topic_{k}"] = float(w[k])
         comm_rows.append(row)
@@ -770,6 +1214,7 @@ def build_community_summary_tables(
 
 
 def save_outputs(
+
     out_dir: Path,
     data: dict,
     matrix_res: MatrixBuildResult,
@@ -777,6 +1222,7 @@ def save_outputs(
     build_cfg: BuildMatrixConfig,
     score_cfg: TopicScoreConfig,
     runtime_sec: float,
+    rep_papers_mode: str = "approx",
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -794,7 +1240,9 @@ def save_outputs(
     sparse.save_npz(out_dir / "D_fit.npz", matrix_res.D_fit)
 
     # 表格
-    df_topics, df_comm, df_topic_comms = build_community_summary_tables(data, matrix_res, topic_res)
+    df_topics, df_comm, df_topic_comms = build_community_summary_tables(
+        data, matrix_res, topic_res, rep_papers_mode=rep_papers_mode
+    )
     df_topics.to_csv(out_dir / "topics_top_words.csv", index=False, encoding="utf-8-sig")
     df_comm.to_csv(out_dir / "communities_topic_weights.csv", index=False, encoding="utf-8-sig")
     df_topic_comms.to_csv(out_dir / "topic_representative_communities.csv", index=False, encoding="utf-8-sig")
@@ -809,6 +1257,12 @@ def save_outputs(
         "build_config": asdict(build_cfg),
         "score_config": asdict(score_cfg),
         "topic_score_meta": topic_res.meta,
+        "representative_papers_config": {
+            "method": "community_internal_citation_centrality" if str(rep_papers_mode).lower() != "off" else "fallback_year_sort",
+            "rep_papers_mode": str(rep_papers_mode).lower(),
+            "betweenness_top_k": 2,
+            "closeness_top_k": 1,
+        },
         "notes": [
             "A_hat: word-topic matrix, columns sum to 1",
             "W_hat_all: topic-community weights, columns sum to 1",
@@ -867,6 +1321,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-svs-combinations", type=int, default=20000)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--no-weighted-nnls", action="store_true", help="关闭加权NNLS（论文Eq.8近似）")
+
+    # 代表论文（社区中心性）模式
+    p.add_argument(
+        "--rep-papers-mode",
+        type=str,
+        default="approx",
+        choices=["exact", "approx", "off"],
+        help="代表论文提取模式：exact=精确中心性；approx=近似中心性（大社区加速，推荐批处理）；off=关闭中心性，回退年份排序",
+    )
 
     # 调试
     p.add_argument("--max-papers", type=int, default=None, help="仅处理前若干篇论文（调试）")
@@ -935,7 +1398,16 @@ def main() -> None:
     topic_res = fit_topic_score_on_communities(matrix_res, score_cfg)
     print(f"[topic_model] fitted Topic-SCORE: A_hat={topic_res.A_hat.shape}, W_hat_all={topic_res.W_hat_all.shape}")
 
-    save_outputs(out_dir, data, matrix_res, topic_res, build_cfg, score_cfg, runtime_sec=time.time() - t0)
+    save_outputs(
+        out_dir,
+        data,
+        matrix_res,
+        topic_res,
+        build_cfg,
+        score_cfg,
+        runtime_sec=time.time() - t0,
+        rep_papers_mode=args.rep_papers_mode,
+    )
 
     # 控制台打印简要主题结果
     top_words = top_words_per_topic(topic_res.A_hat, matrix_res.vocab, topn=10)

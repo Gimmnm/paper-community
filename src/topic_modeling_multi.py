@@ -197,6 +197,7 @@ def run_one_resolution(
     stopwords: set[str],
     build_cfg: tm.BuildMatrixConfig,
     score_cfg: tm.TopicScoreConfig,
+    rep_papers_mode: str = "approx",
     verbose: bool = True,
 ) -> dict:
     t0 = time.time()
@@ -211,7 +212,16 @@ def run_one_resolution(
     matrix_res = tm.build_community_term_matrix(data, membership, stopwords, build_cfg)
     topic_res = tm.fit_topic_score_on_communities(matrix_res, score_cfg)
     runtime = time.time() - t0
-    tm.save_outputs(out_dir, data, matrix_res, topic_res, build_cfg, score_cfg, runtime_sec=runtime)
+    tm.save_outputs(
+        out_dir,
+        data,
+        matrix_res,
+        topic_res,
+        build_cfg,
+        score_cfg,
+        runtime_sec=runtime,
+        rep_papers_mode=rep_papers_mode,
+    )
 
     # 读回摘要表以生成跨分辨率对比指标（避免重复写逻辑）
     df_comm = pd.read_csv(out_dir / "communities_topic_weights.csv", encoding="utf-8-sig")
@@ -332,6 +342,15 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--no-weighted-nnls", action="store_true")
     p.add_argument("--max-papers", type=int, default=None)
+
+    # ---- 代表论文（社区中心性）模式 ----
+    p.add_argument(
+        "--rep-papers-mode",
+        type=str,
+        default="approx",
+        choices=["exact", "approx", "off"],
+        help="代表论文提取模式：exact=精确中心性；approx=近似中心性（大社区加速，推荐批处理）；off=关闭中心性回退年份排序",
+    )
     return p
 
 
