@@ -1,30 +1,23 @@
-from __future__ import annotations  # 允许更灵活的类型注解（未来你加模块时更方便）
+from __future__ import annotations
 
-# pathlib.Path：处理你提供的绝对路径，拼接/判断文件存在更稳
 from pathlib import Path
+from typing import Any, Dict, Tuple
 
-# getdata：负责“读取 RData/txt 并落盘成 pickle”
-from getdata import ingest, load_data
-
-# model：负责“创建 Author/Paper 对象并填充字段”
-from model import build_models
-
-from checklist import run_model_checks
-
-from embedding import embed_all_papers
-
-import numpy as np  # 预定义的 embedding 字段类型
-
-from checklist import run_embedding_checks
-
-from network import build_or_load_mutual_knn_graph
 import igraph as ig
-from community import pick_nearest_resolution, leiden_sweep
-from diagram2d import embed_2d, plot_scatter, graph_layout_2d
+import numpy as np
+
+from checklist import run_embedding_checks, run_model_checks
+from community import leiden_sweep, pick_nearest_resolution
+from diagram2d import embed_2d, graph_layout_2d, plot_scatter
+from embedding import embed_all_papers
+from getdata import ingest, load_data
+from model import build_models
+from network import build_or_load_mutual_knn_graph
+from time_window import analyze_time_window, collect_time_info, make_sliding_window_video
 
 
 # 你给定的目录（绝对路径）
-BASE_DIR = Path(__file__).resolve().parent.parent  
+BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 OUT_DIR = BASE_DIR / "out"
 
@@ -36,59 +29,304 @@ TOPICRESULTS_RDATA = DATA_DIR / "TopicResults_py.RData"
 RAWPAPER_RDATA = DATA_DIR / "RawPaper_py.RData"
 
 EMB_PATH = DATA_DIR / "paper_embeddings_specter2.npy"
-
-# 缓存文件：第一次 ingest 后生成；后续直接 load
 CACHE_PATH = DATA_DIR / "data_store.pkl"
 
 
+# -----------------------------------------------------------------------------
+# 基础加载
+# -----------------------------------------------------------------------------
+
 def build_or_load(exclude_selfcite: bool = False):
     """
-    作用：
-      - 这是 core 层的入口函数
-      - 如果缓存不存在：
-          调用 getdata.ingest() 从 RData/txt 读原始数据并生成 data_store.pkl
-      - 然后：
-          调用 getdata.load_data() 读回 payload
-          调用 model.build_models() 创建并填充 Author/Paper 对象数组
-
-    参数：
-      - exclude_selfcite：
-          是否过滤自引引用边（PapPapMat 的 SelfCite 字段）
-
-    返回：
-      - authors: authors[aid] 是 Author（1..2831），authors[0]=None
-      - papers: papers[pid] 是 Paper（1..83331），papers[0]=None
-      - data: 原始 payload dict（你若需要直接访问 list-of-lists 也可以用它）
+    读取原始数据并构建 Author / Paper 对象。
     """
-    # 1) 缓存不存在就 ingest 一次
     if not CACHE_PATH.exists():
         ingest(
             authorpaper_rdata=AUTHORPAPER_RDATA,
             author_name_txt=AUTHOR_NAME_TXT,
             textcorpus_rdata=TEXTCORPUS_RDATA,
             topicresults_rdata=TOPICRESULTS_RDATA,
-            rawpaper_rdata=RAWPAPER_RDATA, 
+            rawpaper_rdata=RAWPAPER_RDATA,
             out_path=CACHE_PATH,
             exclude_selfcite=exclude_selfcite,
         )
 
-    # 2) 读取缓存并构建对象
     data = load_data(CACHE_PATH)
     authors, papers = build_models(data)
     return authors, papers, data
 
 
 
+def build_or_load_embeddings(
+    papers,
+    *,
+    emb_path: Path = EMB_PATH,
+    batch_size: int = 16,
+    prefer_gpu: bool = False,
+) -> np.ndarray:
+    """
+    加载或计算 paper embedding。
+    约定：返回矩阵 embs，且 embs[pid] 对应 papers[pid]（1-based）。
+    """
+    emb_path = Path(emb_path)
+    if emb_path.exists():
+        embs = np.load(emb_path, mmap_mode="r")
+        print("[emb] loaded from disk:", embs.shape, embs.dtype, "example:", embs[1, :5])
+        return embs
+
+    embs = embed_all_papers(
+        papers=papers,
+        out_npy_path=str(emb_path),
+        batch_size=batch_size,
+        prefer_gpu=prefer_gpu,
+        attach_to_papers=False,
+    )
+    print("[emb] computed and saved:", embs.shape, embs.dtype)
+    return embs
+
+
+
+def build_or_load_global_2d(
+    embs: np.ndarray,
+    *,
+    out_dir: Path = OUT_DIR,
+    cache_name: str = "umap2d.npy",
+    method: str = "umap",
+    random_state: int = 42,
+) -> np.ndarray:
+    X = np.asarray(embs[1:], dtype=np.float32)
+    Y_cache = Path(out_dir) / cache_name
+    Y = embed_2d(
+        X,
+        method=method,
+        normalize=True,
+        pca_dim=50,
+        umap_neighbors=30,
+        umap_min_dist=0.1,
+        umap_metric="cosine",
+        random_state=random_state,
+        cache_npy=Y_cache,
+        verbose=True,
+    )
+    return Y
+
+
+
+def build_or_load_global_graph(
+    embs: np.ndarray,
+    *,
+    out_dir: Path = OUT_DIR,
+    k: int = 50,
+    knn_backend: str = "hnswlib",
+    knn_batch_size: int = 4096,
+    cache_name: Optional[str] = None,
+) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    X = np.asarray(embs[1:], dtype=np.float32)
+    if cache_name is None:
+        cache_name = f"mutual_knn_k{k}.npz"
+    edges_cache = Path(out_dir) / cache_name
+    return build_or_load_mutual_knn_graph(
+        X,
+        k=k,
+        cache_npz=edges_cache,
+        knn_backend=knn_backend,
+        knn_batch_size=knn_batch_size,
+        normalize=True,
+        verbose=True,
+    )
+
+
+
+def build_igraph_from_edge_triplets(
+    n_nodes: int,
+    u: np.ndarray,
+    v: np.ndarray,
+    w: np.ndarray,
+) -> ig.Graph:
+    G = ig.Graph(n=int(n_nodes), edges=list(zip(u.tolist(), v.tolist())), directed=False)
+    G.es["weight"] = np.asarray(w, dtype=np.float32).astype(float)
+    return G
+
+
+
+def prepare_global_pipeline(
+    *,
+    exclude_selfcite: bool = False,
+    k: int = 50,
+    knn_backend: str = "hnswlib",
+    knn_batch_size: int = 4096,
+) -> Dict[str, Any]:
+    """
+    一次性准备全局分析所需的全部对象：
+      - authors / papers / data
+      - embs / X
+      - 全局 2D 坐标 Y
+      - 全图 mutual-kNN 图与 igraph
+      - 时间信息 time_info
+
+    这是后续时间窗口模块最直接的入口。
+    """
+    authors, papers, data = build_or_load(exclude_selfcite=exclude_selfcite)
+    embs = build_or_load_embeddings(papers)
+
+    X = np.asarray(embs[1:], dtype=np.float32)
+    print("[core] X:", X.shape, X.dtype)
+
+    Y = build_or_load_global_2d(embs, out_dir=OUT_DIR)
+    plot_scatter(
+        Y,
+        title="UMAP(2D) of paper embeddings",
+        out_png=OUT_DIR / "fig_umap2d.png",
+        point_size=1.0,
+        alpha=0.6,
+        max_points=None,
+    )
+
+    A_sym, (u, v, w) = build_or_load_global_graph(
+        embs,
+        out_dir=OUT_DIR,
+        k=k,
+        knn_backend=knn_backend,
+        knn_batch_size=knn_batch_size,
+    )
+    G = build_igraph_from_edge_triplets(X.shape[0], u, v, w)
+    time_info = collect_time_info(papers, out_dir=OUT_DIR / "time_info", verbose=True)
+
+    return {
+        "authors": authors,
+        "papers": papers,
+        "data": data,
+        "embs": embs,
+        "X": X,
+        "Y": Y,
+        "A_sym": A_sym,
+        "u": u,
+        "v": v,
+        "w": w,
+        "G": G,
+        "time_info": time_info,
+    }
+
+
+# -----------------------------------------------------------------------------
+# 直接给时间窗口模块调用的包装入口
+# -----------------------------------------------------------------------------
+
+def run_single_time_window(
+    *,
+    start_year: int,
+    end_year: int,
+    resolution: float,
+    exclude_selfcite: bool = False,
+    k: int = 50,
+    knn_backend: str = "hnswlib",
+    knn_batch_size: int = 4096,
+) -> Dict[str, Any]:
+    """
+    运行单个时间窗：
+      1) 继承全图社区
+      2) 仅在窗口内部重建图并重跑社区
+      3) 输出对比图与对比报告
+    """
+    ctx = prepare_global_pipeline(
+        exclude_selfcite=exclude_selfcite,
+        k=k,
+        knn_backend=knn_backend,
+        knn_batch_size=knn_batch_size,
+    )
+    result = analyze_time_window(
+        ctx["papers"],
+        ctx["embs"],
+        ctx["Y"],
+        ctx["u"],
+        ctx["v"],
+        ctx["w"],
+        start_year=start_year,
+        end_year=end_year,
+        resolution=resolution,
+        out_dir=OUT_DIR / "time_windows",
+        global_graph=ctx["G"],
+        global_leiden_dir=OUT_DIR / "leiden_global_single",
+        time_info=ctx["time_info"],
+        k=k,
+        knn_backend=knn_backend,
+        knn_batch_size=knn_batch_size,
+        normalize=True,
+        seed=42,
+        point_size=3.0,
+        alpha=0.85,
+        verbose=True,
+    )
+    return result
+
+
+
+def run_time_window_animation(
+    *,
+    resolution: float,
+    window_size: int = 5,
+    step: int = 1,
+    fps: int = 2,
+    exclude_selfcite: bool = False,
+    k: int = 50,
+    knn_backend: str = "hnswlib",
+    knn_batch_size: int = 4096,
+) -> Dict[str, Any]:
+    """
+    运行滑动窗口动态可视化：
+      - 默认 5 年窗口
+      - 默认 1 年一滑
+      - 每帧都是 inherited / refit 并排对比图
+    """
+    ctx = prepare_global_pipeline(
+        exclude_selfcite=exclude_selfcite,
+        k=k,
+        knn_backend=knn_backend,
+        knn_batch_size=knn_batch_size,
+    )
+    result = make_sliding_window_video(
+        ctx["papers"],
+        ctx["embs"],
+        ctx["Y"],
+        ctx["u"],
+        ctx["v"],
+        ctx["w"],
+        resolution=resolution,
+        out_dir=OUT_DIR / "time_windows_animation",
+        global_graph=ctx["G"],
+        global_leiden_dir=OUT_DIR / "leiden_global_single",
+        time_info=ctx["time_info"],
+        window_size=window_size,
+        step=step,
+        k=k,
+        knn_backend=knn_backend,
+        knn_batch_size=knn_batch_size,
+        normalize=True,
+        seed=42,
+        fps=fps,
+        point_size=3.0,
+        alpha=0.85,
+        verbose=True,
+    )
+    return result
+
 
 if __name__ == "__main__":
     """
-    作用：
-      - 让 core.py 可以直接运行做一次全量构建
-      - 并输出一些基本 sanity check，确认数据和对象结构一致
+    保留你原来的主流程，并额外把时间窗口入口函数挂在 core.py 里，方便直接 import 调用。
+
+    用法示例（建议在交互环境里调用，而不是默认一次性全跑）：
+
+        from core import run_single_time_window, run_time_window_animation
+
+        # 单个窗口
+        run_single_time_window(start_year=1995, end_year=1999, resolution=1.0)
+
+        # 动画：5 年窗口，1 年步长
+        run_time_window_animation(resolution=1.0, window_size=5, step=1, fps=2)
     """
     authors, papers, data = build_or_load(exclude_selfcite=False)
 
-    # 生成一份更详细的建模检查报告
     run_model_checks(
         authors,
         papers,
@@ -99,26 +337,9 @@ if __name__ == "__main__":
         max_show_examples=5,
         write_report_path=str(DATA_DIR / "data_check.txt"),
     )
-    
-    if EMB_PATH.exists():
-        # 已经算过：直接用 memmap 方式加载（不占用大量内存）
-        embs = np.load(EMB_PATH, mmap_mode="r")
-        print("[emb] loaded from disk:", embs.shape, embs.dtype, "example:", embs[1, :5])
-    else:
-        # 没算过：先计算，再保存
-        embs = embed_all_papers(
-            papers=papers,
-            out_npy_path=EMB_PATH,
-            batch_size=16,
-            prefer_gpu=False,
-            attach_to_papers=False,
-        )
-        print("[emb] computed and saved:", embs.shape, embs.dtype)
-    
-    # （可选）如果你后续模块想统一从 data 里取
-    # data["paper_embeddings"] = embs
-    
-    
+
+    embs = build_or_load_embeddings(papers)
+
     run_embedding_checks(
         papers=papers,
         embs=embs,
@@ -129,32 +350,11 @@ if __name__ == "__main__":
         write_report_path=str(DATA_DIR / "embedding_check.txt"),
     )
 
-    
-    # ------------------------------------------------------------
-    # 0) 准备 0-based 视角的数据：X shape=(N,768), idx=0..N-1 对应 pid=idx+1
-    # ------------------------------------------------------------
-    X = np.asarray(embs[1:], dtype=np.float32)  # (83331, 768)
+    X = np.asarray(embs[1:], dtype=np.float32)
     N = X.shape[0]
     print("[core] X:", X.shape, X.dtype)
 
-    # ------------------------------------------------------------
-    # 1) 2D 嵌入（embedding->2D）
-    # ------------------------------------------------------------
-    Y_cache = OUT_DIR / "umap2d.npy"
-    Y = embed_2d(
-        X,
-        method="umap",
-        normalize=True,
-        pca_dim=50,
-        umap_neighbors=30,
-        umap_min_dist=0.1,
-        umap_metric="cosine",
-        random_state=42,
-        cache_npy=Y_cache,
-        verbose=True,
-    )
-
-    # 保存一个“纯 2D 不上色”的图
+    Y = build_or_load_global_2d(embs, out_dir=OUT_DIR)
     plot_scatter(
         Y,
         title="UMAP(2D) of paper embeddings",
@@ -164,89 +364,64 @@ if __name__ == "__main__":
         max_points=None,
     )
 
-    # ------------------------------------------------------------
-    # 2) mutual-kNN 建图（无向权重图）
-    # ------------------------------------------------------------
-    edges_cache = OUT_DIR / "mutual_knn_k50.npz"
-    A_sym, (u, v, w) = build_or_load_mutual_knn_graph(
-        X,
+    A_sym, (u, v, w) = build_or_load_global_graph(
+        embs,
+        out_dir=OUT_DIR,
         k=50,
-        cache_npz=edges_cache,
-        knn_backend="hnswlib",     # hnswlib
+        knn_backend="hnswlib",
         knn_batch_size=4096,
-        normalize=True,          # cosine 几何必须 normalize
-        verbose=True,
     )
 
-    # ------------------------------------------------------------
-    # 3) Leiden 多分辨率扫描（分层结果）
-    # ------------------------------------------------------------
+    G = build_igraph_from_edge_triplets(N, u, v, w)
+
     
-    # u, v, w 是 mutual-kNN 得到的边（0-based）
-    # N = 83331
-    G = ig.Graph(n=N, edges=list(zip(u, v)), directed=False)
-    G.es["weight"] = w.astype(float)
 
-    leiden_out_dir = OUT_DIR / "leiden_sweep"
-    results = leiden_sweep(
-        G,
-        out_dir=leiden_out_dir,
-        r_min=0.2,
-        r_max=2.0,
-        step=0.05,           # <<<< 扫细；想更细就 0.02
-        include=[1.0],       # 强制包含 1.0（双保险）
-        seed=42,
-        save_each_membership=True,
-        verbose=True,
+    # 下面这段 sweep 保留为注释，方便你继续做全图分辨率扫描
+    # leiden_out_dir = OUT_DIR / "leiden_sweep"
+    # results = leiden_sweep(
+    #     G,
+    #     out_dir=leiden_out_dir,
+    #     r_min=0.2,
+    #     r_max=2.0,
+    #     step=0.05,
+    #     include=[1.0],
+    #     seed=42,
+    #     save_each_membership=True,
+    #     verbose=True,
+    # )
+    # r0 = pick_nearest_resolution(results, 1.0)
+    # labels = results[r0]["membership"]
+    # plot_scatter(
+    #     Y,
+    #     labels=labels,
+    #     title=f"UMAP(2D) colored by Leiden (r={r0})",
+    #     out_png=OUT_DIR / "fig_umap_leiden.png",
+    #     point_size=1.0,
+    #     alpha=0.7,
+    # )
+
+    # 可选：网络布局视图
+    # Yg = graph_layout_2d(
+    #     n_nodes=N,
+    #     u=u,
+    #     v=v,
+    #     w=w,
+    #     method="drl",
+    #     init_xy=Y,
+    #     cache_npy=OUT_DIR / "graph_drl2d.npy",
+    # )
+    
+        # 单个时间窗
+    run_single_time_window(
+        start_year=1995,
+        end_year=1999,
+        resolution=1.0,
     )
 
-    resolutions = sorted(results.keys())
-    # A) UMAP 2D 上染色（输出成帧）
-    frames_umap = OUT_DIR / "frames_umap"
-    frames_umap.mkdir(parents=True, exist_ok=True)
-
-    for i, r0 in enumerate(resolutions):
-        labels = results[r0]["membership"]
-        print(f"[core] using resolution r={r0:.4f}, n_comm={results[r0]['n_comm']}")
-
-        plot_scatter(
-            Y,
-            labels=labels,
-            title=f"UMAP(2D) colored by Leiden (r={r0})",
-            out_png=frames_umap / f"frame_{i:04d}.png",   # 用序号保证 ffmpeg 顺序正确
-            point_size=1.0,
-            alpha=0.7,
-            max_points=None,
-        )
-
-
-
-    # ------------------------------------------------------------
-    # 5) 可视化 B：先对网络做 layout->2D，再按社区染色
-    # ------------------------------------------------------------
-    Yg = graph_layout_2d(
-        n_nodes=N,
-        u=u,
-        v=v,
-        w=w,
-        method="drl",
-        init_xy=Y,
-        cache_npy=OUT_DIR / "graph_drl2d.npy",
+    # 动画：5 年窗口，一年一年滑
+    run_time_window_animation(
+        resolution=1.0,
+        window_size=5,
+        step=1,
+        fps=2,
     )
-
-    frames_graph = OUT_DIR / "frames_graph"
-    frames_graph.mkdir(parents=True, exist_ok=True)
-
-    for i, r0 in enumerate(resolutions):
-        labels = results[r0]["membership"]   # ✅ 这里必须重新取
-        plot_scatter(
-            Yg,
-            labels=labels,
-            title=f"Graph layout (DRL) colored by Leiden (r={r0})",
-            out_png=frames_graph / f"frame_{i:04d}.png",
-            point_size=1.0,
-            alpha=0.7,
-            max_points=None,
-        )
-
-

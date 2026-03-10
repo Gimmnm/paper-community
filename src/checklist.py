@@ -623,3 +623,162 @@ def run_embedding_checks(
     if write_report_path:
         Path(write_report_path).write_text("\n".join(out_lines), encoding="utf-8")
         _w(f"[saved] report -> {write_report_path}")
+
+
+# -----------------------------------------------------------------------------
+# clustering comparison for time-window analysis
+# -----------------------------------------------------------------------------
+
+def compare_clusterings(
+    labels_a: Sequence[int],
+    labels_b: Sequence[int],
+    *,
+    name_a: str = "inherited",
+    name_b: str = "refit",
+    pids: Optional[Sequence[int]] = None,
+    topk: int = 10,
+    write_report_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    对比两套聚类结果（标签值本身可不同，因此默认按 permutation-invariant 方式比较）。
+
+    输出：
+      - ARI / NMI（若 sklearn 可用）
+      - contingency matrix
+      - best-match accuracy（Hungarian 对齐）
+      - purity(A->B) / purity(B->A)
+      - Top 社区匹配摘要
+    """
+    la = np.asarray(labels_a, dtype=np.int64).reshape(-1)
+    lb = np.asarray(labels_b, dtype=np.int64).reshape(-1)
+    if la.shape != lb.shape:
+        raise ValueError(f"shape mismatch: {la.shape} vs {lb.shape}")
+    n = int(la.shape[0])
+    if n == 0:
+        raise ValueError("empty labels")
+
+    # 压缩为连续标签，避免社区 id 很稀疏
+    uniq_a, inv_a = np.unique(la, return_inverse=True)
+    uniq_b, inv_b = np.unique(lb, return_inverse=True)
+    na = int(len(uniq_a))
+    nb = int(len(uniq_b))
+
+    # contingency matrix: rows=A communities, cols=B communities
+    M = np.zeros((na, nb), dtype=np.int64)
+    np.add.at(M, (inv_a, inv_b), 1)
+
+    # 直接同号比例（不是 permutation invariant，仅供参考）
+    direct_equal_rate = float(np.mean(la == lb))
+
+    # Hungarian best alignment accuracy
+    try:
+        from scipy.optimize import linear_sum_assignment
+
+        rr, cc = linear_sum_assignment(-M)
+        matched = int(M[rr, cc].sum())
+        best_acc = matched / float(n)
+    except Exception:
+        rr, cc = np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+        matched = -1
+        best_acc = float("nan")
+
+    purity_a_to_b = float(M.max(axis=1).sum() / float(n))
+    purity_b_to_a = float(M.max(axis=0).sum() / float(n))
+
+    ari = None
+    nmi = None
+    try:
+        from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+
+        ari = float(adjusted_rand_score(inv_a, inv_b))
+        nmi = float(normalized_mutual_info_score(inv_a, inv_b))
+    except Exception:
+        pass
+
+    # Top community matches: 对 A 中最大社区，看它在 B 中主要落到哪儿
+    a_sizes = M.sum(axis=1)
+    order_a = np.argsort(-a_sizes)
+    top_rows = []
+    for ia in order_a[: min(topk, na)]:
+        row = M[ia]
+        jb = int(np.argmax(row))
+        overlap = int(row[jb])
+        size_a = int(a_sizes[ia])
+        size_b = int(M[:, jb].sum())
+        precision = overlap / float(size_a) if size_a > 0 else 0.0
+        recall = overlap / float(size_b) if size_b > 0 else 0.0
+        jaccard = overlap / float(size_a + size_b - overlap) if (size_a + size_b - overlap) > 0 else 0.0
+        top_rows.append(
+            {
+                "community_a": int(uniq_a[ia]),
+                "community_b": int(uniq_b[jb]),
+                "size_a": size_a,
+                "size_b": size_b,
+                "overlap": overlap,
+                "precision": precision,
+                "recall": recall,
+                "jaccard": jaccard,
+            }
+        )
+
+    lines: List[str] = []
+    lines.append("=" * 80)
+    lines.append("CLUSTERING COMPARISON REPORT")
+    lines.append("=" * 80)
+    lines.append(f"n_items                = {n}")
+    lines.append(f"{name_a} communities    = {na}")
+    lines.append(f"{name_b} communities    = {nb}")
+    lines.append(f"direct_equal_rate      = {direct_equal_rate:.6f}")
+    if best_acc == best_acc:
+        lines.append(f"best_alignment_acc     = {best_acc:.6f}")
+    else:
+        lines.append("best_alignment_acc     = NaN")
+    lines.append(f"purity({name_a}->{name_b}) = {purity_a_to_b:.6f}")
+    lines.append(f"purity({name_b}->{name_a}) = {purity_b_to_a:.6f}")
+    lines.append(f"ARI                    = {ari if ari is not None else 'N/A'}")
+    lines.append(f"NMI                    = {nmi if nmi is not None else 'N/A'}")
+    lines.append("")
+    lines.append("Top matched communities (sorted by size in first clustering):")
+    for row in top_rows:
+        lines.append(
+            "  "
+            f"{name_a}={row['community_a']:>5d} (size={row['size_a']:>5d})  ->  "
+            f"{name_b}={row['community_b']:>5d} (size={row['size_b']:>5d}) | "
+            f"overlap={row['overlap']:>5d} | "
+            f"precision={row['precision']:.4f} recall={row['recall']:.4f} jaccard={row['jaccard']:.4f}"
+        )
+
+    if pids is not None:
+        pids = np.asarray(pids).reshape(-1)
+        if pids.shape[0] == n:
+            disagree = np.where(inv_a != inv_b)[0]
+            lines.append("")
+            lines.append("Example indices where compressed labels differ (first 20):")
+            for idx in disagree[:20]:
+                lines.append(
+                    f"  pid={int(pids[idx])} | {name_a}={int(la[idx])} | {name_b}={int(lb[idx])}"
+                )
+
+    report = "\n".join(lines)
+    print(report)
+
+    if write_report_path:
+        rp = Path(write_report_path)
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        rp.write_text(report, encoding="utf-8")
+
+    return {
+        "n_items": n,
+        "n_comm_a": na,
+        "n_comm_b": nb,
+        "direct_equal_rate": direct_equal_rate,
+        "best_alignment_acc": best_acc,
+        "purity_a_to_b": purity_a_to_b,
+        "purity_b_to_a": purity_b_to_a,
+        "ari": ari,
+        "nmi": nmi,
+        "contingency": M,
+        "top_matches": top_rows,
+        "matched_rows": rr,
+        "matched_cols": cc,
+    }

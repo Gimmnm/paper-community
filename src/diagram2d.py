@@ -170,6 +170,24 @@ def labels_to_colors_by_centroid(
     return colors
 
 
+def compute_xy_limits(Y: np.ndarray, pad_ratio: float = 0.03) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """
+    基于整张 2D 图计算固定显示范围，便于不同时间窗之间保持同一视野。
+    """
+    Y = np.asarray(Y, dtype=np.float32)
+    xmin = float(np.min(Y[:, 0]))
+    xmax = float(np.max(Y[:, 0]))
+    ymin = float(np.min(Y[:, 1]))
+    ymax = float(np.max(Y[:, 1]))
+
+    dx = max(xmax - xmin, 1e-6)
+    dy = max(ymax - ymin, 1e-6)
+    padx = dx * float(pad_ratio)
+    pady = dy * float(pad_ratio)
+    return (xmin - padx, xmax + padx), (ymin - pady, ymax + pady)
+
+
+
 def plot_scatter(
     Y: np.ndarray,
     *,
@@ -181,6 +199,10 @@ def plot_scatter(
     alpha: float = 0.7,
     max_points: Optional[int] = None,
     random_state: int = 42,
+    xlim: Optional[Tuple[float, float]] = None,
+    ylim: Optional[Tuple[float, float]] = None,
+    figsize: Tuple[float, float] = (10, 8),
+    dpi: int = 160,
     verbose: bool = True,
 ) -> None:
     """
@@ -188,6 +210,7 @@ def plot_scatter(
       - 如果提供 labels：自动用 centroid 渐变色上色
       - 如果提供 colors：直接用 colors（RGBA）画
       - max_points：如果你担心画 83k 太慢/太大，可以随机采样一部分点
+      - xlim/ylim：用于固定视野（时间窗对比时很重要）
     """
     Y = np.asarray(Y, dtype=np.float32)
     N = Y.shape[0]
@@ -205,12 +228,17 @@ def plot_scatter(
         Cp = colors
 
     t0 = time.time()
-    plt.figure(figsize=(10, 8), dpi=160)
+    plt.figure(figsize=figsize, dpi=dpi)
 
     if Cp is not None:
         plt.scatter(Yp[:, 0], Yp[:, 1], s=point_size, alpha=alpha, c=Cp, linewidths=0, rasterized=True)
     else:
         plt.scatter(Yp[:, 0], Yp[:, 1], s=point_size, alpha=alpha, linewidths=0, rasterized=True)
+
+    if xlim is not None:
+        plt.xlim(*xlim)
+    if ylim is not None:
+        plt.ylim(*ylim)
 
     plt.title(title)
     plt.xlabel("x")

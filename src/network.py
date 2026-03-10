@@ -300,7 +300,7 @@ def build_or_load_mutual_knn_graph(
     *,
     k: int,
     cache_npz: Optional[Path],
-    knn_backend: Literal["faiss", "sklearn"] = "faiss",
+    knn_backend: Literal["faiss", "sklearn", "hnswlib"] = "faiss",
     knn_batch_size: int = 4096,
     normalize: bool = True,
     verbose: bool = True,
