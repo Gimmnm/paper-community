@@ -48,6 +48,11 @@ def _save_json(path: Path, obj: Dict[str, Any]) -> None:
 
 
 
+def _res_tag(resolution: float) -> str:
+    s = f"{float(resolution):.3f}".rstrip("0").rstrip(".")
+    return s.replace(".", "p")
+
+
 def compact_labels(labels: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
     将任意整数标签压缩到 0..C-1，同时返回原始 unique label 映射。
@@ -345,7 +350,7 @@ def _plot_dual_window_compare(
 
     out_png = Path(out_png)
     out_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_png, bbox_inches="tight")
+    fig.savefig(out_png)
     plt.close(fig)
 
     if verbose:
@@ -363,47 +368,71 @@ def _write_video_from_frames(
     out_video = Path(out_video)
     out_video.parent.mkdir(parents=True, exist_ok=True)
 
-    # 方案 A：imageio / imageio-ffmpeg
-    try:
-        import imageio.v2 as imageio
+    if len(frame_paths) == 0:
+        raise ValueError("frame_paths is empty")
 
-        with imageio.get_writer(out_video, fps=fps) as writer:
-            for p in frame_paths:
-                writer.append_data(imageio.imread(p))
-        if verbose:
-            print(f"[time] saved video -> {out_video}")
-        return out_video
-    except Exception:
-        pass
+    import imageio.v2 as imageio
 
-    # 方案 B：ffmpeg 命令行
+    frames = [imageio.imread(p) for p in frame_paths]
+    max_h = max(int(im.shape[0]) for im in frames)
+    max_w = max(int(im.shape[1]) for im in frames)
+    # H.264 + yuv420p 通常要求偶数尺寸；这里统一补白并对齐到偶数
+    target_h = (max_h + 1) // 2 * 2
+    target_w = (max_w + 1) // 2 * 2
+
+    norm_dir = out_video.parent / "_video_frames"
+    norm_dir.mkdir(parents=True, exist_ok=True)
+
+    norm_paths: List[Path] = []
+    for i, im in enumerate(frames):
+        if im.ndim == 2:
+            im = np.stack([im, im, im], axis=-1)
+        if im.shape[2] == 4:
+            im = im[:, :, :3]
+
+        canvas = np.full((target_h, target_w, 3), 255, dtype=np.uint8)
+        h, w = int(im.shape[0]), int(im.shape[1])
+        y0 = (target_h - h) // 2
+        x0 = (target_w - w) // 2
+        canvas[y0:y0 + h, x0:x0 + w] = im[:, :, :3]
+
+        fp = norm_dir / f"f_{i:04d}.png"
+        imageio.imwrite(fp, canvas)
+        norm_paths.append(fp)
+
     ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is not None and len(frame_paths) > 0:
-        frame_dir = Path(frame_paths[0]).parent
+    if ffmpeg is not None:
         cmd = [
             ffmpeg,
             "-y",
             "-framerate",
             str(int(fps)),
             "-i",
-            str(frame_dir / "frame_%04d.png"),
+            str(norm_dir / "f_%04d.png"),
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high",
             "-pix_fmt",
             "yuv420p",
+            "-movflags",
+            "+faststart",
             str(out_video),
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if verbose:
-            print(f"[time] saved video via ffmpeg -> {out_video}")
-        return out_video
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if verbose:
+                print(f"[time] saved video -> {out_video}")
+            return out_video
+        except subprocess.CalledProcessError as e:
+            if verbose:
+                err = e.stderr.decode("utf-8", errors="ignore")[:500]
+                print(f"[time] ffmpeg encode failed, fallback to gif: {err}")
 
-    # 方案 C：至少给出 GIF 兜底
     gif_path = out_video.with_suffix(".gif")
-    import imageio.v2 as imageio
-
-    images = [imageio.imread(p) for p in frame_paths]
-    imageio.mimsave(gif_path, images, fps=fps)
+    imageio.mimsave(gif_path, [imageio.imread(p) for p in norm_paths], fps=fps)
     if verbose:
-        print(f"[time] ffmpeg unavailable, saved gif instead -> {gif_path}")
+        print(f"[time] saved gif -> {gif_path}")
     return gif_path
 
 
@@ -474,7 +503,7 @@ def analyze_time_window(
 
     xlim, ylim = compute_xy_limits(Y)
 
-    window_dir = out_dir / f"window_{int(start_year)}_{int(end_year)}_r{float(resolution):.4f}"
+    window_dir = out_dir / f"w_{int(start_year)}_{int(end_year)}_r{_res_tag(resolution)}"
     inherited_dir = window_dir / "inherited"
     refit_dir = window_dir / "refit"
     compare_dir = window_dir / "compare"
@@ -799,7 +828,8 @@ def make_sliding_window_video(
         )
 
     _save_json(frames_dir / "manifest.json", {"frames": manifest})
-    out_video = out_dir / f"sliding_window_{window_size}y_step{step}_r{float(resolution):.4f}.mp4"
+    step_tag = "" if int(step) == 1 else f"_s{int(step)}"
+    out_video = out_dir / f"tw_{int(window_size)}y_r{_res_tag(resolution)}{step_tag}.mp4"
     actual_video = _write_video_from_frames(frame_paths, out_video, fps=fps, verbose=verbose)
 
     summary = {
