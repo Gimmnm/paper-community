@@ -171,21 +171,17 @@ def labels_to_colors_by_centroid(
 
 
 def compute_xy_limits(Y: np.ndarray, pad_ratio: float = 0.03) -> Tuple[Tuple[float, float], Tuple[float, float]]:
-    """
-    基于整张 2D 图计算固定显示范围，便于不同时间窗之间保持同一视野。
-    """
+    """基于整张 2D 图计算固定显示范围，便于不同时间窗保持同一视野。"""
     Y = np.asarray(Y, dtype=np.float32)
     xmin = float(np.min(Y[:, 0]))
     xmax = float(np.max(Y[:, 0]))
     ymin = float(np.min(Y[:, 1]))
     ymax = float(np.max(Y[:, 1]))
-
     dx = max(xmax - xmin, 1e-6)
     dy = max(ymax - ymin, 1e-6)
     padx = dx * float(pad_ratio)
     pady = dy * float(pad_ratio)
     return (xmin - padx, xmax + padx), (ymin - pady, ymax + pady)
-
 
 
 def plot_scatter(
@@ -203,6 +199,7 @@ def plot_scatter(
     ylim: Optional[Tuple[float, float]] = None,
     figsize: Tuple[float, float] = (10, 8),
     dpi: int = 160,
+    bbox_tight: bool = True,
     verbose: bool = True,
 ) -> None:
     """
@@ -248,7 +245,8 @@ def plot_scatter(
     if out_png is not None:
         out_png = Path(out_png)
         out_png.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(out_png, bbox_inches="tight")
+        save_kwargs = {"bbox_inches": "tight"} if bbox_tight else {}
+        plt.savefig(out_png, **save_kwargs)
         if verbose:
             print(f"[plot] saved -> {out_png}")
 

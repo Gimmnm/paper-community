@@ -53,6 +53,7 @@ def _res_tag(resolution: float) -> str:
     return s.replace(".", "p")
 
 
+
 def compact_labels(labels: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
     将任意整数标签压缩到 0..C-1，同时返回原始 unique label 映射。
@@ -368,37 +369,35 @@ def _write_video_from_frames(
     out_video = Path(out_video)
     out_video.parent.mkdir(parents=True, exist_ok=True)
 
-    if len(frame_paths) == 0:
-        raise ValueError("frame_paths is empty")
+    if not frame_paths:
+        raise ValueError("empty frame_paths")
 
     import imageio.v2 as imageio
+    from PIL import Image
 
-    frames = [imageio.imread(p) for p in frame_paths]
-    max_h = max(int(im.shape[0]) for im in frames)
-    max_w = max(int(im.shape[1]) for im in frames)
-    # H.264 + yuv420p 通常要求偶数尺寸；这里统一补白并对齐到偶数
-    target_h = (max_h + 1) // 2 * 2
-    target_w = (max_w + 1) // 2 * 2
+    # 统一帧尺寸，避免因为 bbox 或标题长度变化导致编码失败
+    sizes = []
+    for p in frame_paths:
+        with Image.open(p) as im:
+            sizes.append(im.size)
+    max_w = max(w for w, _ in sizes)
+    max_h = max(h for _, h in sizes)
+    if max_w % 2 == 1:
+        max_w += 1
+    if max_h % 2 == 1:
+        max_h += 1
 
-    norm_dir = out_video.parent / "_video_frames"
+    norm_dir = out_video.parent / "_frames_norm"
     norm_dir.mkdir(parents=True, exist_ok=True)
-
     norm_paths: List[Path] = []
-    for i, im in enumerate(frames):
-        if im.ndim == 2:
-            im = np.stack([im, im, im], axis=-1)
-        if im.shape[2] == 4:
-            im = im[:, :, :3]
-
-        canvas = np.full((target_h, target_w, 3), 255, dtype=np.uint8)
-        h, w = int(im.shape[0]), int(im.shape[1])
-        y0 = (target_h - h) // 2
-        x0 = (target_w - w) // 2
-        canvas[y0:y0 + h, x0:x0 + w] = im[:, :, :3]
-
-        fp = norm_dir / f"f_{i:04d}.png"
-        imageio.imwrite(fp, canvas)
-        norm_paths.append(fp)
+    for i, p in enumerate(frame_paths):
+        with Image.open(p) as im:
+            im = im.convert("RGB")
+            canvas = Image.new("RGB", (max_w, max_h), (255, 255, 255))
+            canvas.paste(im, ((max_w - im.width) // 2, (max_h - im.height) // 2))
+            fp = norm_dir / f"f_{i:04d}.png"
+            canvas.save(fp)
+            norm_paths.append(fp)
 
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is not None:
