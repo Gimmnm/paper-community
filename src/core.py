@@ -9,37 +9,82 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-import igraph as ig
+try:
+    import igraph as ig  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    ig = None
 import numpy as np
 
 from checklist import run_embedding_checks, run_model_checks
-from community import (
-    leiden_sweep,
-    load_membership_for_resolution,
-    pick_nearest_resolution,
-    run_hierarchy_sweep,
-)
-from diagram2d import embed_2d, graph_layout_2d, plot_scatter
-from embedding import embed_all_papers
+try:
+    from community import (  # type: ignore
+        induced_subgraph_edge_list,
+        leiden_sweep,
+        load_membership_for_resolution,
+        nearest_resolution_in_summary,
+        pick_nearest_resolution,
+        rank_communities_by_size,
+        # run_hierarchy_sweep is used by both subgraph/vertexset hierarchy
+        run_hierarchy_sweep,
+    )
+except Exception:  # pragma: no cover
+    induced_subgraph_edge_list = None
+    leiden_sweep = None
+    load_membership_for_resolution = None
+    nearest_resolution_in_summary = None
+    pick_nearest_resolution = None
+    rank_communities_by_size = None
+    run_hierarchy_sweep = None
+try:
+    from diagram2d import embed_2d, graph_layout_2d, plot_scatter
+except Exception:  # pragma: no cover
+    embed_2d = None
+    graph_layout_2d = None
+    plot_scatter = None
+try:
+    from embedding import embed_all_papers
+except Exception:  # pragma: no cover
+    embed_all_papers = None
 from getdata import ingest, load_data
 from model import build_models
-from network import build_or_load_mutual_knn_graph
-from time_window import analyze_time_window, collect_time_info, make_sliding_window_video
+from network import build_or_load_mutual_knn_graph, load_edges_npz
+from project_paths import data_source_paths, embedding_path_specter2, out_dir, REPO_ROOT
+from demo_graph import (
+    build_demo_graph_from_membership,
+    load_membership_for_resolution_light,
+    save_demo_graph_json,
+    summarize_demo_graph,
+)
+from demo_search import (
+    build_demo_assets_and_graph,
+    expand_from_paper,
+    lookup_community,
+    lookup_paper,
+    save_result_json,
+    search_keyword,
+)
+try:
+    from time_window import analyze_time_window, collect_time_info, make_sliding_window_video
+except Exception:  # pragma: no cover
+    analyze_time_window = None
+    collect_time_info = None
+    make_sliding_window_video = None
 
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = REPO_ROOT
 SRC_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-OUT_DIR = BASE_DIR / "out"
+_DATA = data_source_paths(BASE_DIR)
+DATA_DIR = _DATA.data_dir
+OUT_DIR = out_dir(BASE_DIR)
 
-AUTHOR_NAME_TXT = DATA_DIR / "author_name.txt"
-AUTHORPAPER_RDATA = DATA_DIR / "AuthorPaperInfo_py.RData"
-TEXTCORPUS_RDATA = DATA_DIR / "TextCorpusFinal_py.RData"
-TOPICRESULTS_RDATA = DATA_DIR / "TopicResults_py.RData"
-RAWPAPER_RDATA = DATA_DIR / "RawPaper_py.RData"
+AUTHOR_NAME_TXT = _DATA.author_name_txt
+AUTHORPAPER_RDATA = _DATA.authorpaper_rdata
+TEXTCORPUS_RDATA = _DATA.textcorpus_rdata
+TOPICRESULTS_RDATA = _DATA.topicresults_rdata
+RAWPAPER_RDATA = _DATA.rawpaper_rdata
 
-EMB_PATH = DATA_DIR / "paper_embeddings_specter2.npy"
-CACHE_PATH = DATA_DIR / "data_store.pkl"
+EMB_PATH = embedding_path_specter2(BASE_DIR)
+CACHE_PATH = _DATA.cache_path
 
 
 # -----------------------------------------------------------------------------
@@ -47,19 +92,20 @@ CACHE_PATH = DATA_DIR / "data_store.pkl"
 # -----------------------------------------------------------------------------
 
 def build_or_load(*, exclude_selfcite: bool = False, force_reingest: bool = False):
-    if force_reingest and CACHE_PATH.exists():
-        CACHE_PATH.unlink()
-    if not CACHE_PATH.exists():
+    p = data_source_paths(BASE_DIR)
+    if force_reingest and p.cache_path.exists():
+        p.cache_path.unlink()
+    if not p.cache_path.exists():
         ingest(
-            authorpaper_rdata=AUTHORPAPER_RDATA,
-            author_name_txt=AUTHOR_NAME_TXT,
-            textcorpus_rdata=TEXTCORPUS_RDATA,
-            topicresults_rdata=TOPICRESULTS_RDATA,
-            rawpaper_rdata=RAWPAPER_RDATA,
-            out_path=CACHE_PATH,
+            authorpaper_rdata=p.authorpaper_rdata,
+            author_name_txt=p.author_name_txt,
+            textcorpus_rdata=p.textcorpus_rdata,
+            topicresults_rdata=p.topicresults_rdata,
+            rawpaper_rdata=p.rawpaper_rdata,
+            out_path=p.cache_path,
             exclude_selfcite=exclude_selfcite,
         )
-    data = load_data(CACHE_PATH)
+    data = load_data(p.cache_path)
     authors, papers = build_models(data)
     return authors, papers, data
 
@@ -72,6 +118,11 @@ def build_or_load_embeddings(
     prefer_gpu: bool = False,
     force: bool = False,
 ) -> np.ndarray:
+    _require_callable(
+        embed_all_papers,
+        name="embed_all_papers",
+        install_hint="pip install -r requirements.txt  # (or install torch + transformers deps required by embedding)",
+    )
     emb_path = Path(emb_path)
     if emb_path.exists() and not force:
         embs = np.load(emb_path, mmap_mode="r")
@@ -99,6 +150,11 @@ def build_or_load_global_2d(
     umap_min_dist: float = 0.1,
     force: bool = False,
 ) -> np.ndarray:
+    _require_callable(
+        embed_2d,
+        name="embed_2d",
+        install_hint="pip install -r requirements.txt  # (or install umap-learn/pacmap + plotting deps)",
+    )
     X = np.asarray(embs[1:], dtype=np.float32)
     cache_path = Path(out_dir) / cache_name
     if force and cache_path.exists():
@@ -145,9 +201,269 @@ def build_or_load_global_graph(
 
 
 def build_igraph_from_edge_triplets(n_nodes: int, u: np.ndarray, v: np.ndarray, w: np.ndarray) -> ig.Graph:
+    if ig is None:  # pragma: no cover
+        raise ImportError(
+            "需要 python-igraph 才能构建 igraph 对象：pip install python-igraph"
+        )
     G = ig.Graph(n=int(n_nodes), edges=list(zip(u.tolist(), v.tolist())), directed=False)
     G.es["weight"] = np.asarray(w, dtype=np.float32).astype(float).tolist()
     return G
+
+
+# -----------------------------------------------------------------------------
+# Demo: CommunityGraph（Milestone A）
+# -----------------------------------------------------------------------------
+
+
+def task_demo_graph(args: argparse.Namespace) -> Dict[str, Any]:
+    authors, papers, data = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
+
+    leiden_dir = Path(args.leiden_dir)
+    membership = load_membership_for_resolution_light(leiden_dir, float(args.resolution), allow_nearest=True)
+
+    graph_npz = Path(args.graph_npz) if args.graph_npz else (OUT_DIR / f"mutual_knn_k{int(args.k)}.npz")
+    u, v, w, n_nodes, k0, normalized = load_edges_npz(graph_npz)
+    if n_nodes != (len(papers) - 1):
+        raise ValueError(
+            f"graph nodes mismatch: n_nodes={n_nodes} vs n_papers={len(papers)-1}; "
+            f"ensure graph_npz matches the dataset."
+        )
+
+    g = build_demo_graph_from_membership(
+        papers,
+        membership,
+        resolution=float(args.resolution),
+        u=u,
+        v=v,
+        w=w,
+        top_center=int(args.top_center),
+        top_bridge=int(args.top_bridge),
+        top_neighbor_comms=int(args.top_neighbor_comms),
+        neighbor_weight=str(args.neighbor_weight),
+    )
+
+    summary = summarize_demo_graph(g, top_n=int(args.top_n))
+    print(
+        f"[demo-graph] papers={summary['n_papers']}  communities={summary['n_communities']}  "
+        f"r={summary['resolution']:.4f}  comm_edges={summary['community_edges']}"
+    )
+    for row in summary.get("top_communities_by_size", []):
+        print(f"  - cid={row['cid']:<5d} size={row['size']:<6d}")
+        if row["center_papers"]:
+            t = row["center_papers"][0]
+            print(f"      center:  pid={t['pid']:<6d}  {t['title'][:90]}")
+        if row["bridge_papers"]:
+            t = row["bridge_papers"][0]
+            print(f"      bridge:  pid={t['pid']:<6d}  {t['title'][:90]}")
+        if row["neighbor_communities"]:
+            t = row["neighbor_communities"][0]
+            print(f"      neighbor: cid={t['cid']:<6d} weight={t['weight']:.3f}")
+
+    if args.save_json:
+        save_demo_graph_json(g, Path(args.save_json))
+        print("[demo-graph] saved json ->", args.save_json)
+
+    return {
+        "meta": {"n_papers": int(g.n_papers), "n_communities": int(g.n_communities), "resolution": float(g.resolution)},
+        "graph_npz": str(graph_npz.resolve()),
+        "leiden_dir": str(leiden_dir.resolve()),
+        "saved_json": None if not args.save_json else str(Path(args.save_json).resolve()),
+    }
+
+
+def _demo_common_paths(args: argparse.Namespace) -> Dict[str, Path]:
+    leiden_dir = Path(args.leiden_dir) if getattr(args, "leiden_dir", None) else (OUT_DIR / "leiden_sweep_rb")
+    graph_npz = Path(args.graph_npz) if getattr(args, "graph_npz", None) else (OUT_DIR / f"mutual_knn_k{int(args.k)}.npz")
+    keyword_index_dir = Path(args.keyword_index_dir) if getattr(args, "keyword_index_dir", None) else (OUT_DIR / "keyword_index")
+    return {"leiden_dir": leiden_dir, "graph_npz": graph_npz, "keyword_index_dir": keyword_index_dir}
+
+
+def task_demo_keyword(args: argparse.Namespace) -> Dict[str, Any]:
+    _, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
+    paths = _demo_common_paths(args)
+    assets, g = build_demo_assets_and_graph(
+        base_dir=BASE_DIR,
+        papers=papers,
+        leiden_dir=paths["leiden_dir"],
+        resolution=float(args.resolution),
+        graph_npz=paths["graph_npz"],
+        keyword_index_dir=paths["keyword_index_dir"],
+    )
+    res = search_keyword(assets=assets, papers=papers, graph=g, query=str(args.query), top_k=int(args.top_k))
+    print(json.dumps(res, ensure_ascii=False, indent=2) if args.pretty else json.dumps(res, ensure_ascii=False))
+    if args.save_json:
+        save_result_json(res, Path(args.save_json))
+        print("[demo-keyword] saved json ->", args.save_json)
+    return res
+
+
+def task_demo_paper(args: argparse.Namespace) -> Dict[str, Any]:
+    _, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
+    paths = _demo_common_paths(args)
+    assets, g = build_demo_assets_and_graph(
+        base_dir=BASE_DIR,
+        papers=papers,
+        leiden_dir=paths["leiden_dir"],
+        resolution=float(args.resolution),
+        graph_npz=paths["graph_npz"],
+        keyword_index_dir=paths["keyword_index_dir"],
+    )
+    res = lookup_paper(
+        assets=assets,
+        papers=papers,
+        graph=g,
+        pid=int(args.pid),
+        k_neighbors=int(args.k_neighbors),
+        k_neighbors_in_comm=int(args.k_neighbors_in_comm),
+        k_neighbor_comms=int(args.k_neighbor_comms),
+    )
+    print(json.dumps(res, ensure_ascii=False, indent=2) if args.pretty else json.dumps(res, ensure_ascii=False))
+    if args.save_json:
+        save_result_json(res, Path(args.save_json))
+        print("[demo-paper] saved json ->", args.save_json)
+    return res
+
+
+def task_demo_community(args: argparse.Namespace) -> Dict[str, Any]:
+    _, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
+    paths = _demo_common_paths(args)
+    _, g = build_demo_assets_and_graph(
+        base_dir=BASE_DIR,
+        papers=papers,
+        leiden_dir=paths["leiden_dir"],
+        resolution=float(args.resolution),
+        graph_npz=paths["graph_npz"],
+        keyword_index_dir=paths["keyword_index_dir"],
+    )
+    res = lookup_community(
+        papers=papers,
+        graph=g,
+        cid=int(args.cid),
+        top_papers=int(args.top_papers),
+        top_neighbors=int(args.top_neighbors),
+    )
+    print(json.dumps(res, ensure_ascii=False, indent=2) if args.pretty else json.dumps(res, ensure_ascii=False))
+    if args.save_json:
+        save_result_json(res, Path(args.save_json))
+        print("[demo-community] saved json ->", args.save_json)
+    return res
+
+
+def task_demo_expand(args: argparse.Namespace) -> Dict[str, Any]:
+    _, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
+    paths = _demo_common_paths(args)
+    assets, g = build_demo_assets_and_graph(
+        base_dir=BASE_DIR,
+        papers=papers,
+        leiden_dir=paths["leiden_dir"],
+        resolution=float(args.resolution),
+        graph_npz=paths["graph_npz"],
+        keyword_index_dir=paths["keyword_index_dir"],
+    )
+    res = expand_from_paper(
+        assets=assets,
+        papers=papers,
+        graph=g,
+        pid=int(args.pid),
+        k_papers=int(args.k_papers),
+        k_comms=int(args.k_comms),
+    )
+    print(json.dumps(res, ensure_ascii=False, indent=2) if args.pretty else json.dumps(res, ensure_ascii=False))
+    if args.save_json:
+        save_result_json(res, Path(args.save_json))
+        print("[demo-expand] saved json ->", args.save_json)
+    return res
+
+
+def task_demo_regress(args: argparse.Namespace) -> Dict[str, Any]:
+    """
+    最小回归：验证四个入口都能跑通，且关键字段存在。
+    """
+    _, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
+    paths = _demo_common_paths(args)
+    assets, g = build_demo_assets_and_graph(
+        base_dir=BASE_DIR,
+        papers=papers,
+        leiden_dir=paths["leiden_dir"],
+        resolution=float(args.resolution),
+        graph_npz=paths["graph_npz"],
+        keyword_index_dir=paths["keyword_index_dir"],
+    )
+
+    out: Dict[str, Any] = {"checks": []}
+
+    # 1) keyword
+    kw = search_keyword(assets=assets, papers=papers, graph=g, query=str(args.query), top_k=int(args.top_k))
+    assert kw["type"] == "keyword"
+    assert "hits" in kw and isinstance(kw["hits"], list)
+    out["checks"].append({"name": "keyword", "ok": True, "n_hits": len(kw["hits"]), "mode": kw.get("debug", {}).get("mode")})
+
+    # pick pid
+    pid = int(args.pid)
+    if pid <= 0:
+        if kw["hits"]:
+            pid = int(kw["hits"][0]["payload"]["pid"])
+        else:
+            pid = 1
+
+    # 2) paper
+    pr = lookup_paper(assets=assets, papers=papers, graph=g, pid=pid, k_neighbors=10, k_neighbors_in_comm=5, k_neighbor_comms=5)
+    assert pr["type"] == "paper"
+    assert pr["hits"] and pr["hits"][0]["payload"].get("pid") == pid
+    out["checks"].append({"name": "paper", "ok": True, "pid": pid, "community": pr["hits"][0]["payload"].get("community")})
+
+    # 3) community
+    cid = pr["hits"][0]["payload"].get("community")
+    if cid is None:
+        cid = 0
+    cr = lookup_community(papers=papers, graph=g, cid=int(cid), top_papers=10, top_neighbors=5)
+    assert cr["type"] == "community"
+    assert cr["hits"] and cr["hits"][0]["payload"].get("cid") == int(cid)
+    out["checks"].append({"name": "community", "ok": True, "cid": int(cid), "size": cr["hits"][0]["payload"].get("size")})
+
+    # 4) expand
+    ex = expand_from_paper(assets=assets, papers=papers, graph=g, pid=pid, k_papers=10, k_comms=5)
+    assert ex["type"] == "expand"
+    assert ex["hits"] and ex["hits"][0]["kind"] == "paper"
+    out["checks"].append({"name": "expand", "ok": True, "n_hits": len(ex["hits"])})
+
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return out
+
+
+def task_demo_api(args: argparse.Namespace) -> Dict[str, Any]:
+    """Milestone C：启动 FastAPI（加载论文 + DemoCommunityGraph）。"""
+    try:
+        import uvicorn
+    except ImportError as e:
+        raise ImportError("Milestone C 需要先安装：pip install fastapi uvicorn[standard]") from e
+
+    import os
+
+    graph_npz = Path(args.graph_npz) if args.graph_npz else (OUT_DIR / f"mutual_knn_k{int(args.k)}.npz")
+    os.environ["PC_BASE_DIR"] = str(BASE_DIR.resolve())
+    os.environ["PC_RESOLUTION"] = str(float(args.resolution))
+    os.environ["PC_LEIDEN_DIR"] = str(Path(args.leiden_dir).resolve())
+    os.environ["PC_GRAPH_NPZ"] = str(graph_npz.resolve())
+    os.environ["PC_KEYWORD_INDEX_DIR"] = str(Path(args.keyword_index_dir).resolve())
+    os.environ["PC_K"] = str(int(args.k))
+    if bool(getattr(args, "exclude_selfcite", False)):
+        os.environ["PC_EXCLUDE_SELFCITE"] = "1"
+    else:
+        os.environ.pop("PC_EXCLUDE_SELFCITE", None)
+    if getattr(args, "cors_origins", None):
+        os.environ["PC_CORS_ORIGINS"] = str(args.cors_origins)
+
+    import demo_api_app
+
+    print(f"[demo-api] docs: http://{args.host}:{args.port}/docs")
+    uvicorn.run(
+        demo_api_app.app,
+        host=str(args.host),
+        port=int(args.port),
+        reload=bool(getattr(args, "reload", False)),
+    )
+    return {}
 
 
 def prepare_global_pipeline(
@@ -158,6 +474,16 @@ def prepare_global_pipeline(
     knn_batch_size: int = 4096,
     emb_path: Path = EMB_PATH,
 ) -> Dict[str, Any]:
+    _require_callable(
+        plot_scatter,
+        name="plot_scatter",
+        install_hint="pip install -r requirements.txt  # (matplotlib etc.)",
+    )
+    _require_callable(
+        collect_time_info,
+        name="collect_time_info",
+        install_hint="pip install -r requirements.txt",
+    )
     authors, papers, data = build_or_load(exclude_selfcite=exclude_selfcite)
     embs = build_or_load_embeddings(papers, emb_path=emb_path)
     X = np.asarray(embs[1:], dtype=np.float32)
@@ -301,6 +627,14 @@ def _topic_root_for_k(k_topics: int) -> Path:
     return OUT_DIR / "topic_modeling_multi" / f"K{k_topics}"
 
 
+def _require_callable(fn: object, *, name: str, install_hint: str) -> None:
+    if fn is None:
+        raise SystemExit(
+            f"[error] `{name}` is unavailable because optional dependencies failed to import.\n"
+            f"Install requirements and retry: {install_hint}"
+        )
+
+
 # -----------------------------------------------------------------------------
 # 任务
 # -----------------------------------------------------------------------------
@@ -362,6 +696,11 @@ def task_check_embed(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_build_2d(args: argparse.Namespace) -> Dict[str, Any]:
+    _require_callable(
+        plot_scatter,
+        name="plot_scatter",
+        install_hint="pip install -r requirements.txt  # (matplotlib etc.)",
+    )
     _, papers, _ = build_or_load(exclude_selfcite=args.exclude_selfcite, force_reingest=args.force_reingest)
     embs = build_or_load_embeddings(papers, emb_path=Path(args.emb_path))
     Y = build_or_load_global_2d(
@@ -410,6 +749,16 @@ def task_build_graph(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_graph_layout(args: argparse.Namespace) -> Dict[str, Any]:
+    _require_callable(
+        graph_layout_2d,
+        name="graph_layout_2d",
+        install_hint="pip install -r requirements.txt  # (python-igraph layout deps)",
+    )
+    _require_callable(
+        plot_scatter,
+        name="plot_scatter",
+        install_hint="pip install -r requirements.txt  # (matplotlib etc.)",
+    )
     ctx = prepare_global_pipeline(
         exclude_selfcite=args.exclude_selfcite,
         k=args.k,
@@ -445,6 +794,16 @@ def task_graph_layout(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_sweep(args: argparse.Namespace) -> Dict[str, Any]:
+    _require_callable(
+        leiden_sweep,
+        name="leiden_sweep",
+        install_hint="pip install python-igraph leidenalg",
+    )
+    _require_callable(
+        pick_nearest_resolution,
+        name="pick_nearest_resolution",
+        install_hint="pip install python-igraph leidenalg",
+    )
     _, papers, _ = build_or_load(exclude_selfcite=args.exclude_selfcite, force_reingest=args.force_reingest)
     embs = build_or_load_embeddings(papers, emb_path=Path(args.emb_path))
     X = np.asarray(embs[1:], dtype=np.float32)
@@ -471,6 +830,11 @@ def task_sweep(args: argparse.Namespace) -> Dict[str, Any]:
         verbose=True,
     )
     if args.plot_reference is not None:
+        _require_callable(
+            plot_scatter,
+            name="plot_scatter",
+            install_hint="pip install -r requirements.txt  # (matplotlib etc.)",
+        )
         Y = build_or_load_global_2d(embs, out_dir=OUT_DIR)
         r0 = pick_nearest_resolution(results, args.plot_reference)
         labels = results[r0]["membership"]
@@ -493,6 +857,11 @@ def task_sweep(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_hierarchy(args: argparse.Namespace) -> Dict[str, Any]:
+    _require_callable(
+        run_hierarchy_sweep,
+        name="run_hierarchy_sweep",
+        install_hint="pip install python-igraph leidenalg",
+    )
     _, papers, _ = build_or_load(exclude_selfcite=args.exclude_selfcite, force_reingest=args.force_reingest)
     embs = build_or_load_embeddings(papers, emb_path=Path(args.emb_path))
     X = np.asarray(embs[1:], dtype=np.float32)
@@ -531,7 +900,237 @@ def task_hierarchy(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
+def task_subgraph_hierarchy(args: argparse.Namespace) -> Dict[str, Any]:
+    """
+    在全局划分某一社区顶点集上的 **诱导子图** 内做多分辨率 Leiden + 层级连边，
+    用于观察「大块内部」是否再分裂，而不仅是全局剥落小社区。
+    """
+    _require_callable(
+        nearest_resolution_in_summary,
+        name="nearest_resolution_in_summary",
+        install_hint="pip install python-igraph leidenalg",
+    )
+    _require_callable(
+        load_membership_for_resolution,
+        name="load_membership_for_resolution",
+        install_hint="pip install python-igraph leidenalg",
+    )
+    _require_callable(
+        rank_communities_by_size,
+        name="rank_communities_by_size",
+        install_hint="pip install python-igraph leidenalg",
+    )
+    _require_callable(
+        induced_subgraph_edge_list,
+        name="induced_subgraph_edge_list",
+        install_hint="pip install python-igraph leidenalg",
+    )
+    _require_callable(
+        run_hierarchy_sweep,
+        name="run_hierarchy_sweep",
+        install_hint="pip install python-igraph leidenalg",
+    )
+    leiden_dir = Path(args.leiden_dir)
+    nearest_r = nearest_resolution_in_summary(leiden_dir, float(args.parent_resolution))
+    membership = load_membership_for_resolution(leiden_dir, nearest_r, allow_nearest=True)
+
+    if args.list_top is not None and int(args.list_top) > 0:
+        ranks = rank_communities_by_size(membership, top_k=int(args.list_top))
+        print(
+            f"[subgraph-hierarchy] parent membership r≈{nearest_r:.4f} "
+            f"(nearest to requested {float(args.parent_resolution):.4f}), "
+            f"top-{len(ranks)} communities by size:"
+        )
+        for cid, sz in ranks:
+            print(f"  id={cid:6d}  size={sz:6d}")
+        return {"mode": "list", "parent_resolution_used": nearest_r, "top": ranks}
+
+    if args.community is None:
+        raise SystemExit(
+            "pass --community <id> to run local hierarchy, or --list-top N to print largest communities first"
+        )
+
+    if args.graph_npz:
+        graph_npz = Path(args.graph_npz)
+    elif args.cache_name:
+        graph_npz = OUT_DIR / args.cache_name
+    else:
+        graph_npz = OUT_DIR / f"mutual_knn_k{int(args.k)}.npz"
+    if not graph_npz.exists():
+        raise FileNotFoundError(f"graph npz not found: {graph_npz}")
+
+    u, v, w, n_nodes, k_disk, _norm = load_edges_npz(graph_npz)
+    if int(membership.shape[0]) != int(n_nodes):
+        raise ValueError(
+            f"membership length {membership.shape[0]} != graph n_nodes {n_nodes}; "
+            "use the same k / graph that produced this leiden sweep."
+        )
+    if int(k_disk) != int(args.k):
+        print(
+            f"[warn] --k={args.k} but npz records k={k_disk}; subgraph uses edges from npz (k_disk)."
+        )
+
+    comm_id = int(args.community)
+    verts = np.where(np.asarray(membership, dtype=np.int32) == comm_id)[0]
+    if verts.size == 0:
+        raise SystemExit(f"no vertices for community id={comm_id} at membership r≈{nearest_r:.4f}")
+
+    ul, vl, wl, global_idx = induced_subgraph_edge_list(n_nodes, u, v, w, verts)
+    if ul.size == 0:
+        print(
+            f"[warn] induced subgraph has no internal edges (n_verts={verts.size}); "
+            "local Leiden may degenerate (many isolates)."
+        )
+
+    if args.out_dir is not None:
+        out_dir = Path(args.out_dir)
+    else:
+        tag = "rb" if args.partition_type == "RBConfigurationVertexPartition" else "cpm"
+        out_dir = OUT_DIR / "subgraph_hierarchy" / f"k{int(k_disk)}_r{nearest_r:.4f}_c{comm_id}_{tag}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    G_sub = build_igraph_from_edge_triplets(int(global_idx.size), ul, vl, wl)
+    meta: Dict[str, Any] = {
+        "task": "subgraph-hierarchy",
+        "graph_npz": str(graph_npz.resolve()),
+        "parent_leiden_dir": str(leiden_dir.resolve()),
+        "parent_resolution_requested": float(args.parent_resolution),
+        "parent_resolution_membership": float(nearest_r),
+        "parent_community_id": int(comm_id),
+        "n_global_nodes": int(n_nodes),
+        "n_subgraph_vertices": int(global_idx.size),
+        "n_subgraph_edges": int(ul.size),
+        "k_graph": int(k_disk),
+        "partition_type": str(args.partition_type),
+        "local_hierarchy_dir": str(out_dir.resolve()),
+    }
+    np.save(out_dir / "global_vertex_indices.npy", global_idx)
+    (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    res = run_hierarchy_sweep(
+        G_sub,
+        out_dir=out_dir,
+        r_min=args.r_min,
+        r_max=args.r_max,
+        step=args.step,
+        include=args.include,
+        seed=args.seed,
+        save_each_membership=True,
+        reuse_existing=(not args.force),
+        resolution_mode=args.resolution_mode,
+        partition_type=args.partition_type,
+        min_child_share=args.min_child_share,
+        verbose=True,
+    )
+    bps = res["hierarchy"]["breakpoints"]
+    print("[subgraph-hierarchy] local top breakpoints:")
+    for bp in bps[:10]:
+        print(f"  r={bp['resolution']:.4f}  score={bp['score']:.3f}  ΔC={bp['delta_n_comm']}  VI={bp['vi_adjacent']}")
+    return {
+        "out_dir": str(out_dir),
+        "n_subgraph_vertices": int(global_idx.size),
+        "n_subgraph_edges": int(ul.size),
+        "n_local_breakpoints": int(len(bps)),
+        "meta": str(out_dir / "meta.json"),
+    }
+
+
+def task_vertexset_hierarchy(args: argparse.Namespace) -> Dict[str, Any]:
+    """
+    在任意顶点集合（全局下标）诱导子图上做多分辨率 Leiden + 层级诊断。
+
+    目的：把“粗分领域（例如 k-means=3）”作为根集合，然后在各领域内部跑局部分层。
+    所有输出写入单独 out-dir，避免影响已有 sweep/hierarchy 目录。
+    """
+    _require_callable(
+        induced_subgraph_edge_list,
+        name="induced_subgraph_edge_list",
+        install_hint="pip install python-igraph leidenalg",
+    )
+    _require_callable(
+        run_hierarchy_sweep,
+        name="run_hierarchy_sweep",
+        install_hint="pip install python-igraph leidenalg",
+    )
+    vertex_path = Path(args.vertex_indices)
+    if not vertex_path.exists():
+        raise FileNotFoundError(f"--vertex-indices not found: {vertex_path}")
+    verts = np.load(vertex_path).astype(np.int64)
+    verts = np.unique(verts)
+    if verts.size == 0:
+        raise SystemExit("empty vertex_indices")
+
+    if args.graph_npz:
+        graph_npz = Path(args.graph_npz)
+    elif args.cache_name:
+        graph_npz = OUT_DIR / args.cache_name
+    else:
+        graph_npz = OUT_DIR / f"mutual_knn_k{int(args.k)}.npz"
+    if not graph_npz.exists():
+        raise FileNotFoundError(f"graph npz not found: {graph_npz}")
+
+    u, v, w, n_nodes, k_disk, _norm = load_edges_npz(graph_npz)
+    if int(verts.min()) < 0 or int(verts.max()) >= int(n_nodes):
+        raise ValueError(f"vertex indices out of range [0,{n_nodes}) in {vertex_path}")
+    if int(k_disk) != int(args.k):
+        print(f"[warn] --k={args.k} but npz records k={k_disk}; using edges from npz (k_disk).")
+
+    ul, vl, wl, global_idx = induced_subgraph_edge_list(n_nodes, u, v, w, verts)
+    if ul.size == 0:
+        print(f"[warn] induced subgraph has no internal edges (n_verts={verts.size}); may degenerate (isolates).")
+
+    out_dir = Path(args.out_dir) if args.out_dir else (OUT_DIR / "vertexset_hierarchy" / vertex_path.stem)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    meta: Dict[str, Any] = {
+        "task": "vertexset-hierarchy",
+        "graph_npz": str(graph_npz.resolve()),
+        "vertex_indices_path": str(vertex_path.resolve()),
+        "n_global_nodes": int(n_nodes),
+        "n_subgraph_vertices": int(global_idx.size),
+        "n_subgraph_edges": int(ul.size),
+        "k_graph": int(k_disk),
+        "partition_type": str(args.partition_type),
+        "local_hierarchy_dir": str(out_dir.resolve()),
+    }
+    np.save(out_dir / "global_vertex_indices.npy", global_idx.astype(np.int32))
+    (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    G_sub = build_igraph_from_edge_triplets(int(global_idx.size), ul, vl, wl)
+    res = run_hierarchy_sweep(
+        G_sub,
+        out_dir=out_dir,
+        r_min=args.r_min,
+        r_max=args.r_max,
+        step=args.step,
+        include=args.include,
+        seed=args.seed,
+        save_each_membership=True,
+        reuse_existing=(not args.force),
+        resolution_mode=args.resolution_mode,
+        partition_type=args.partition_type,
+        min_child_share=args.min_child_share,
+        verbose=True,
+    )
+    bps = res["hierarchy"]["breakpoints"]
+    print("[vertexset-hierarchy] local top breakpoints:")
+    for bp in bps[:10]:
+        print(f"  r={bp['resolution']:.4f}  score={bp['score']:.3f}  ΔC={bp['delta_n_comm']}  VI={bp['vi_adjacent']}")
+    return {
+        "out_dir": str(out_dir),
+        "n_subgraph_vertices": int(global_idx.size),
+        "n_subgraph_edges": int(ul.size),
+        "n_local_breakpoints": int(len(bps)),
+        "meta": str(out_dir / "meta.json"),
+    }
+
+
 def task_time_window(args: argparse.Namespace) -> Dict[str, Any]:
+    _require_callable(
+        analyze_time_window,
+        name="analyze_time_window",
+        install_hint="pip install -r requirements.txt",
+    )
     return run_single_time_window(
         start_year=args.start_year,
         end_year=args.end_year,
@@ -544,6 +1143,11 @@ def task_time_window(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_time_video(args: argparse.Namespace) -> Dict[str, Any]:
+    _require_callable(
+        make_sliding_window_video,
+        name="make_sliding_window_video",
+        install_hint="pip install -r requirements.txt",
+    )
     return run_time_window_animation(
         resolution=args.resolution,
         window_size=args.window_size,
@@ -949,6 +1553,77 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--min-child-share", type=float, default=0.25)
     sp.set_defaults(func=task_hierarchy)
 
+    # subgraph-hierarchy
+    sp = sub.add_parser(
+        "subgraph-hierarchy",
+        help="在全局某社区的诱导子图上做多分辨率 Leiden + 层级诊断",
+    )
+    add_common_runtime_flags(sp)
+    sp.add_argument("--leiden-dir", type=str, default=str(OUT_DIR / "leiden_sweep"))
+    sp.add_argument(
+        "--parent-resolution",
+        type=float,
+        required=True,
+        help="用于选取全局社区标签的 Leiden 分辨率（与 summary 中最接近的 r 对齐）",
+    )
+    sp.add_argument("--community", type=int, default=None, help="全局 membership 中的社区 id")
+    sp.add_argument(
+        "--list-top",
+        type=int,
+        default=None,
+        metavar="N",
+        help="只打印该分辨率下最大的 N 个社区及规模，然后退出（无需构图）",
+    )
+    sp.add_argument("--k", type=int, default=50, help="用于默认图缓存名 mutual_knn_k{K}.npz（应与 sweep 一致）")
+    sp.add_argument("--graph-npz", type=str, default=None, help="mutual-kNN 边表 npz；默认 out/mutual_knn_k{K}.npz")
+    sp.add_argument("--cache-name", type=str, default=None, help="相对于 out/ 的图缓存文件名")
+    sp.add_argument("--out-dir", type=str, default=None, help="局部 sweep 输出目录；默认自动生成")
+    sp.add_argument("--r-min", type=float, default=0.2)
+    sp.add_argument("--r-max", type=float, default=2.0)
+    sp.add_argument("--step", type=float, default=0.05)
+    sp.add_argument("--include", type=float, nargs="*", default=None)
+    sp.add_argument("--seed", type=int, default=42)
+    sp.add_argument("--resolution-mode", type=str, default="linear", choices=["linear", "log"])
+    sp.add_argument(
+        "--partition-type",
+        type=str,
+        default="RBConfigurationVertexPartition",
+        choices=["RBConfigurationVertexPartition", "CPMVertexPartition"],
+    )
+    sp.add_argument(
+        "--min-child-share",
+        type=float,
+        default=0.15,
+        help="局部层级边过滤；略低于全局默认以便观察弱分裂",
+    )
+    sp.set_defaults(func=task_subgraph_hierarchy)
+
+    # vertexset-hierarchy
+    sp = sub.add_parser(
+        "vertexset-hierarchy",
+        help="在任意顶点集合（全局下标）的诱导子图上做多分辨率 Leiden + 层级诊断",
+    )
+    add_common_runtime_flags(sp)
+    sp.add_argument("--vertex-indices", type=str, required=True, help="npy 文件：全局顶点下标数组（0-based）")
+    sp.add_argument("--k", type=int, default=50, help="用于默认图缓存名 mutual_knn_k{K}.npz（应与构图一致）")
+    sp.add_argument("--graph-npz", type=str, default=None, help="mutual-kNN 边表 npz；默认 out/mutual_knn_k{K}.npz")
+    sp.add_argument("--cache-name", type=str, default=None, help="相对于 out/ 的图缓存文件名")
+    sp.add_argument("--out-dir", type=str, default=None, help="局部 sweep 输出目录；默认 out/vertexset_hierarchy/<stem>/")
+    sp.add_argument("--r-min", type=float, default=0.001)
+    sp.add_argument("--r-max", type=float, default=0.15)
+    sp.add_argument("--step", type=float, default=0.002)
+    sp.add_argument("--include", type=float, nargs="*", default=None)
+    sp.add_argument("--seed", type=int, default=42)
+    sp.add_argument("--resolution-mode", type=str, default="linear", choices=["linear", "log"])
+    sp.add_argument(
+        "--partition-type",
+        type=str,
+        default="CPMVertexPartition",
+        choices=["RBConfigurationVertexPartition", "CPMVertexPartition"],
+    )
+    sp.add_argument("--min-child-share", type=float, default=0.10)
+    sp.set_defaults(func=task_vertexset_hierarchy)
+
     # time-window
     sp = sub.add_parser("time-window", help="单个时间窗分析")
     add_common_runtime_flags(sp)
@@ -1000,6 +1675,113 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-abstract", action="store_true")
     sp.add_argument("--title-boost", type=int, default=3)
     sp.set_defaults(func=task_keyword_search)
+
+    # demo-graph
+    sp = sub.add_parser("demo-graph", help="构建 demo 用的扁平社区图（Milestone A）")
+    add_common_runtime_flags(sp)
+    sp.add_argument("--leiden-dir", type=str, default=str(OUT_DIR / "leiden_sweep_cpm"))
+    sp.add_argument("--resolution", type=float, required=True)
+    sp.add_argument("--k", type=int, default=50, help="用于默认图缓存名 mutual_knn_k{K}.npz（若未显式传 --graph-npz）")
+    sp.add_argument("--graph-npz", type=str, default=None, help="mutual-kNN 边表 npz；默认 out/mutual_knn_k{K}.npz")
+    sp.add_argument("--top-n", type=int, default=8, help="打印规模最大的 N 个社区摘要")
+    sp.add_argument("--top-center", type=int, default=8)
+    sp.add_argument("--top-bridge", type=int, default=8)
+    sp.add_argument("--top-neighbor-comms", type=int, default=12)
+    sp.add_argument("--neighbor-weight", type=str, default="sum_w", choices=["sum_w", "count"])
+    sp.add_argument("--save-json", type=str, default=None, help="可选：导出 demo graph json（给前端直接用）")
+    sp.set_defaults(func=task_demo_graph)
+
+    # demo-keyword
+    sp = sub.add_parser("demo-keyword", help="demo：关键词检索（Milestone B）")
+    add_common_runtime_flags(sp)
+    sp.add_argument("--resolution", type=float, required=True)
+    sp.add_argument("--leiden-dir", type=str, default=str(OUT_DIR / "leiden_sweep_cpm"))
+    sp.add_argument("--k", type=int, default=50)
+    sp.add_argument("--graph-npz", type=str, default=None)
+    sp.add_argument("--keyword-index-dir", type=str, default=str(OUT_DIR / "keyword_index"))
+    sp.add_argument("--query", type=str, required=True)
+    sp.add_argument("--top-k", type=int, default=20)
+    sp.add_argument("--pretty", action="store_true")
+    sp.add_argument("--save-json", type=str, default=None)
+    sp.set_defaults(func=task_demo_keyword)
+
+    # demo-paper
+    sp = sub.add_parser("demo-paper", help="demo：论文画像与邻近（Milestone B）")
+    add_common_runtime_flags(sp)
+    sp.add_argument("--resolution", type=float, required=True)
+    sp.add_argument("--leiden-dir", type=str, default=str(OUT_DIR / "leiden_sweep_cpm"))
+    sp.add_argument("--k", type=int, default=50)
+    sp.add_argument("--graph-npz", type=str, default=None)
+    sp.add_argument("--keyword-index-dir", type=str, default=str(OUT_DIR / "keyword_index"))
+    sp.add_argument("--pid", type=int, required=True)
+    sp.add_argument("--k-neighbors", type=int, default=20)
+    sp.add_argument("--k-neighbors-in-comm", type=int, default=10)
+    sp.add_argument("--k-neighbor-comms", type=int, default=8)
+    sp.add_argument("--pretty", action="store_true")
+    sp.add_argument("--save-json", type=str, default=None)
+    sp.set_defaults(func=task_demo_paper)
+
+    # demo-community
+    sp = sub.add_parser("demo-community", help="demo：社区画像（Milestone B）")
+    add_common_runtime_flags(sp)
+    sp.add_argument("--resolution", type=float, required=True)
+    sp.add_argument("--leiden-dir", type=str, default=str(OUT_DIR / "leiden_sweep_cpm"))
+    sp.add_argument("--k", type=int, default=50)
+    sp.add_argument("--graph-npz", type=str, default=None)
+    sp.add_argument("--keyword-index-dir", type=str, default=str(OUT_DIR / "keyword_index"))
+    sp.add_argument("--cid", type=int, required=True)
+    sp.add_argument("--top-papers", type=int, default=20)
+    sp.add_argument("--top-neighbors", type=int, default=12)
+    sp.add_argument("--pretty", action="store_true")
+    sp.add_argument("--save-json", type=str, default=None)
+    sp.set_defaults(func=task_demo_community)
+
+    # demo-expand
+    sp = sub.add_parser("demo-expand", help="demo：从论文出发的单点发散（Milestone B）")
+    add_common_runtime_flags(sp)
+    sp.add_argument("--resolution", type=float, required=True)
+    sp.add_argument("--leiden-dir", type=str, default=str(OUT_DIR / "leiden_sweep_cpm"))
+    sp.add_argument("--k", type=int, default=50)
+    sp.add_argument("--graph-npz", type=str, default=None)
+    sp.add_argument("--keyword-index-dir", type=str, default=str(OUT_DIR / "keyword_index"))
+    sp.add_argument("--pid", type=int, required=True)
+    sp.add_argument("--k-papers", type=int, default=20)
+    sp.add_argument("--k-comms", type=int, default=10)
+    sp.add_argument("--pretty", action="store_true")
+    sp.add_argument("--save-json", type=str, default=None)
+    sp.set_defaults(func=task_demo_expand)
+
+    # demo-regress
+    sp = sub.add_parser("demo-regress", help="demo：最小回归检查（Milestone B）")
+    add_common_runtime_flags(sp)
+    sp.add_argument("--resolution", type=float, required=True)
+    sp.add_argument("--leiden-dir", type=str, default=str(OUT_DIR / "leiden_sweep_cpm"))
+    sp.add_argument("--k", type=int, default=50)
+    sp.add_argument("--graph-npz", type=str, default=None)
+    sp.add_argument("--keyword-index-dir", type=str, default=str(OUT_DIR / "keyword_index"))
+    sp.add_argument("--query", type=str, default="bayesian")
+    sp.add_argument("--top-k", type=int, default=5)
+    sp.add_argument("--pid", type=int, default=-1, help="<=0 时自动取 keyword 的首条 hit；否则使用给定 pid")
+    sp.set_defaults(func=task_demo_regress)
+
+    # demo-api
+    sp = sub.add_parser("demo-api", help="启动 FastAPI demo 服务（Milestone C）")
+    add_common_runtime_flags(sp)
+    sp.add_argument("--resolution", type=float, required=True)
+    sp.add_argument("--leiden-dir", type=str, default=str(OUT_DIR / "leiden_sweep_cpm"))
+    sp.add_argument("--k", type=int, default=50)
+    sp.add_argument("--graph-npz", type=str, default=None)
+    sp.add_argument("--keyword-index-dir", type=str, default=str(OUT_DIR / "keyword_index"))
+    sp.add_argument("--host", type=str, default="127.0.0.1")
+    sp.add_argument("--port", type=int, default=8000)
+    sp.add_argument("--reload", action="store_true", help="开发热重载（子进程重启）")
+    sp.add_argument(
+        "--cors-origins",
+        type=str,
+        default="*",
+        help="CORS allow_origins，逗号分隔；默认 *",
+    )
+    sp.set_defaults(func=task_demo_api)
 
     # topic-model
     sp = sub.add_parser("topic-model", help="单个分辨率的 Topic-SCORE 主题建模")

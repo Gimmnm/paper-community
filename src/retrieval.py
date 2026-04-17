@@ -9,7 +9,10 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 from scipy import sparse
 
-from community import load_membership_for_resolution
+try:
+    from community import load_membership_for_resolution  # type: ignore
+except Exception:  # pragma: no cover
+    load_membership_for_resolution = None
 
 
 @dataclass
@@ -215,7 +218,10 @@ def search_keywords(
     membership = None
     if resolution is not None and leiden_dir is not None:
         try:
-            membership = load_membership_for_resolution(Path(leiden_dir), float(resolution), allow_nearest=True)
+            if load_membership_for_resolution is None:
+                membership = None
+            else:
+                membership = load_membership_for_resolution(Path(leiden_dir), float(resolution), allow_nearest=True)
         except Exception:
             membership = None
 

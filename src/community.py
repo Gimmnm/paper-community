@@ -568,3 +568,68 @@ def run_hierarchy_sweep(
         verbose=verbose,
     )
     return {"results": results, "hierarchy": hierarchy}
+
+
+def induced_subgraph_edge_list(
+    n_nodes: int,
+    u: np.ndarray,
+    v: np.ndarray,
+    w: np.ndarray,
+    vertex_indices: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    由全局 mutual-kNN 边表 (u,v,w) 取出 **顶点集上的诱导子图** 边表。
+
+    - vertex_indices: 全局顶点编号（与 embedding 行 0..n_nodes-1 一致）
+    - 返回的 u_loc,v_loc 为子图内 0..n_sub-1 编号；global_sorted 为排序后的全局下标，
+      满足 global_sorted[local_id] == 全局编号。
+    """
+    verts = np.unique(np.asarray(vertex_indices, dtype=np.int64))
+    if verts.size == 0:
+        raise ValueError("vertex_indices is empty")
+    if int(verts.min()) < 0 or int(verts.max()) >= int(n_nodes):
+        raise ValueError(f"vertex_indices out of range [0, {n_nodes})")
+
+    pos = np.full(int(n_nodes), -1, dtype=np.int32)
+    pos[verts] = np.arange(verts.size, dtype=np.int32)
+
+    u = np.asarray(u, dtype=np.int64)
+    v = np.asarray(v, dtype=np.int64)
+    w = np.asarray(w, dtype=np.float32)
+    mask = (pos[u] >= 0) & (pos[v] >= 0)
+    if not np.any(mask):
+        return (
+            np.zeros(0, dtype=np.int32),
+            np.zeros(0, dtype=np.int32),
+            np.zeros(0, dtype=np.float32),
+            verts.astype(np.int32),
+        )
+
+    uu = pos[u[mask]]
+    vv = pos[v[mask]]
+    ww = w[mask]
+    return uu.astype(np.int32), vv.astype(np.int32), ww, verts.astype(np.int32)
+
+
+def rank_communities_by_size(membership: np.ndarray, *, top_k: int = 30) -> List[Tuple[int, int]]:
+    """返回 [(community_id, size), ...] 按 size 降序，最多 top_k 条。"""
+    membership = np.asarray(membership, dtype=np.int64)
+    uniq, cnt = np.unique(membership, return_counts=True)
+    order = np.argsort(-cnt)
+    out: List[Tuple[int, int]] = []
+    for i in order[: max(int(top_k), 0)]:
+        out.append((int(uniq[int(i)]), int(cnt[int(i)])))
+    return out
+
+
+def nearest_resolution_in_summary(leiden_dir: Path, r_target: float) -> float:
+    """从已有 sweep 的 summary.npy 中取与 r_target 最接近的分辨率。"""
+    leiden_dir = Path(leiden_dir)
+    summary_path = leiden_dir / "summary.npy"
+    if not summary_path.exists():
+        raise FileNotFoundError(f"summary.npy not found under {leiden_dir}")
+    summary = np.load(summary_path, allow_pickle=True).item()
+    resolutions = [float(x) for x in np.asarray(summary["resolutions"]).tolist()]
+    if not resolutions:
+        raise ValueError(f"empty resolutions in {summary_path}")
+    return float(min(resolutions, key=lambda x: abs(float(x) - float(r_target))))

@@ -261,9 +261,23 @@ def plot_hierarchy_layered(
     max_nodes_per_layer: Optional[int] = None,
     annotate_top_n_per_layer: int = 8,
     y_mode: str = "resolution",
+    r_min: Optional[float] = None,
+    r_max: Optional[float] = None,
     figsize: Tuple[float, float] = (16, 10),
     dpi: int = 180,
 ) -> Dict[str, Any]:
+    if r_min is not None and r_max is not None and float(r_max) < float(r_min):
+        raise ValueError("require r_max >= r_min")
+
+    if r_min is not None or r_max is not None:
+        rmin = -float("inf") if r_min is None else float(r_min)
+        rmax = float("inf") if r_max is None else float(r_max)
+        nodes = [n for n in nodes if rmin <= float(n["resolution"]) <= rmax]
+        if not nodes:
+            raise ValueError("no nodes remain after r_min/r_max filtering")
+        node_ids = {n["node_id"] for n in nodes}
+        edges = [e for e in edges if e["source"] in node_ids and e["target"] in node_ids]
+
     node_by_id = {n["node_id"]: n for n in nodes}
     layers = _group_nodes_by_resolution(nodes)
     resolutions = [r for r, _ in layers]
@@ -383,6 +397,8 @@ def plot_breakpoint_diagnostics(
     out_png: Path,
     out_svg: Optional[Path] = None,
     top_k: int = 12,
+    r_min: Optional[float] = None,
+    r_max: Optional[float] = None,
     dpi: int = 180,
 ) -> Optional[Dict[str, Any]]:
     summary = load_summary(hierarchy_dir)
@@ -407,15 +423,32 @@ def plot_breakpoint_diagnostics(
     if not isinstance(axes, np.ndarray):
         axes = np.asarray([axes])
 
+    # optional range focus
+    if r_min is not None or r_max is not None:
+        rmin = -float("inf") if r_min is None else float(r_min)
+        rmax = float("inf") if r_max is None else float(r_max)
+        m = (r >= rmin) & (r <= rmax)
+        if m.any():
+            r = r[m]
+            if n_comm is not None:
+                n_comm = np.asarray(n_comm, dtype=np.float64)[m]
+            if vi is not None:
+                vi = np.asarray(vi, dtype=np.float64)[m]
+            if quality is not None:
+                quality = np.asarray(quality, dtype=np.float64)[m]
+        else:
+            # keep original arrays; user gave a range that misses the sweep
+            pass
+
     if n_comm is not None:
-        axes[0].plot(r, np.asarray(n_comm, dtype=np.float64), lw=1.5)
+        axes[0].plot(r, np.asarray(n_comm, dtype=np.float64), lw=1.6)
         axes[0].set_ylabel("# communities")
         axes[0].set_title("Sweep diagnostics")
     if vi is not None:
-        axes[1].plot(r, np.asarray(vi, dtype=np.float64), lw=1.5)
+        axes[1].plot(r, np.asarray(vi, dtype=np.float64), lw=1.6)
         axes[1].set_ylabel("VI(adjacent)")
     if quality is not None:
-        axes[2].plot(r, np.asarray(quality, dtype=np.float64), lw=1.5)
+        axes[2].plot(r, np.asarray(quality, dtype=np.float64), lw=1.6)
         axes[2].set_ylabel("quality")
         axes[2].set_xlabel("resolution")
     else:
@@ -431,7 +464,16 @@ def plot_breakpoint_diagnostics(
             for bp in bp_top:
                 rr = _try_float(_pick_first(bp, ["resolution", "r", "r_child"]), None)
                 if rr is not None:
-                    ax.axvline(rr, color="crimson", lw=1.0, alpha=0.28)
+                    ax.axvline(rr, color="crimson", lw=1.2, alpha=0.35)
+        # annotate on the first axis (community count) for readability
+        if n_comm is not None:
+            for i, bp in enumerate(bp_top[: min(6, len(bp_top))], start=1):
+                rr = _try_float(_pick_first(bp, ["resolution", "r", "r_child"]), None)
+                if rr is None:
+                    continue
+                # place near top
+                y = float(np.nanmax(np.asarray(n_comm, dtype=np.float64))) if n_comm is not None else 0.0
+                axes[0].text(rr, y, f"bp{i}", color="crimson", fontsize=8, alpha=0.8, va="bottom", ha="center")
 
     fig.tight_layout()
     out_png.parent.mkdir(parents=True, exist_ok=True)
@@ -481,6 +523,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-nodes-per-layer", type=int, default=40)
     p.add_argument("--annotate-top-n-per-layer", type=int, default=8)
     p.add_argument("--y-mode", choices=["resolution", "layer_index"], default="resolution")
+    p.add_argument("--r-min", type=float, default=None, help="只可视化分辨率 >= r-min 的层（用于聚焦早期/局部）")
+    p.add_argument("--r-max", type=float, default=None, help="只可视化分辨率 <= r-max 的层（用于聚焦早期/局部）")
+    p.add_argument("--breakpoints-top-k", type=int, default=12, help="断点诊断图中标记的 top-k breakpoints 数量")
     p.add_argument("--out-prefix", default="hierarchy")
     p.add_argument("--no-breakpoints", action="store_true")
     return p.parse_args()
@@ -518,6 +563,8 @@ def main() -> None:
         max_nodes_per_layer=int(args.max_nodes_per_layer) if args.max_nodes_per_layer and args.max_nodes_per_layer > 0 else None,
         annotate_top_n_per_layer=int(args.annotate_top_n_per_layer),
         y_mode=args.y_mode,
+        r_min=args.r_min,
+        r_max=args.r_max,
     )
 
     breakpoint_info = None
@@ -528,6 +575,9 @@ def main() -> None:
             hierarchy_dir=hierarchy_dir,
             out_png=bp_png,
             out_svg=bp_svg,
+            top_k=int(args.breakpoints_top_k),
+            r_min=args.r_min,
+            r_max=args.r_max,
         )
 
     overview = write_overview_json(

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Paper Community Demo</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-title">Paper Community Demo</div>
+          <div id="health" class="brand-subtitle">loading…</div>
+        </div>
+        <div class="topbar-actions">
+          <button id="btnLoadCommunities" class="btn">Load community graph</button>
+        </div>
+      </header>
+
+      <main class="main">
+        <section class="panel left">
+          <div class="section">
+            <div class="section-title">Query</div>
+            <div class="tabs">
+              <button class="tab active" data-tab="keyword">Keyword</button>
+              <button class="tab" data-tab="paper">Paper</button>
+              <button class="tab" data-tab="community">Community</button>
+            </div>
+
+            <div class="tab-content" data-tab-content="keyword">
+              <div class="row">
+                <input id="kwInput" class="input" placeholder="e.g. bayesian" />
+                <input id="kwTopK" class="input small" type="number" min="1" max="200" value="20" />
+                <button id="kwSearch" class="btn primary">Search</button>
+              </div>
+              <div class="row">
+                <button id="kwPrev" class="btn">Prev</button>
+                <button id="kwNext" class="btn">Next</button>
+                <div id="kwPage" class="muted"></div>
+              </div>
+              <div class="hint">Uses TF‑IDF if available, otherwise substring fallback.</div>
+            </div>
+
+            <div class="tab-content hidden" data-tab-content="paper">
+              <div class="row">
+                <input id="paperIdInput" class="input" placeholder="paper id (pid)" />
+                <input id="paperK" class="input small" type="number" min="1" max="200" value="20" />
+                <button id="paperLookup" class="btn primary">Lookup</button>
+              </div>
+              <div class="hint">Shows neighbors and community summary.</div>
+            </div>
+
+            <div class="tab-content hidden" data-tab-content="community">
+              <div class="row">
+                <input id="commIdInput" class="input" placeholder="community id (cid)" />
+                <input id="commTopPapers" class="input small" type="number" min="1" max="500" value="20" />
+                <button id="commLookup" class="btn primary">Lookup</button>
+              </div>
+              <div class="row">
+                <input id="commMaxNodes" class="input small" type="number" min="5" max="500" value="60" />
+                <input id="commMaxEdges" class="input small" type="number" min="10" max="5000" value="200" />
+                <button id="commSubgraph" class="btn">Load subgraph</button>
+              </div>
+              <div class="hint">Load paper subgraph for this community.</div>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Results</div>
+            <div id="results" class="results"></div>
+          </div>
+        </section>
+
+        <section class="panel center">
+          <div class="section-title">Graph</div>
+          <div id="cy" class="graph"></div>
+          <div class="graph-footer">
+            <div id="graphMeta" class="muted"></div>
+            <div class="graph-controls">
+              <label class="chk"><input id="toggleLabels" type="checkbox" /> Labels</label>
+              <label class="chk"><input id="toggleEdges" type="checkbox" checked /> Edges</label>
+              <label class="chk">Spread <input id="spread" type="range" min="40" max="220" value="200" /></label>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel right">
+          <div class="section">
+            <div class="section-title">Details</div>
+            <div id="details" class="details"></div>
+            <div class="details-actions">
+              <button id="toggleRaw" class="btn">Raw JSON</button>
+            </div>
+            <pre id="rawJson" class="details raw hidden">{}</pre>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
+
