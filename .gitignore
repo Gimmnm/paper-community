@@ -44,6 +44,7 @@ data/graph/**
 # 评测/可视化等输出
 out/**
 !out/.gitkeep
+!out/README.txt
 
 # 各类中间文件（按需保留/忽略）
 data/*.npy
@@ -55,3 +56,24 @@ data/*_coords*.csv
 # 如果 embeddings 是从上游项目产出的，也建议忽略：
 data/embeddings*.npy
 data/embeddings*.npz
+
+# --- archive 下大块可再生实验输出（不提交；说明见 archive/legacy/ARCHIVE_INDEX.md）---
+archive/legacy/out/
+
+# --- 文档构建中间文件 ---
+docs/slides/*.aux
+docs/slides/*.log
+docs/slides/*.nav
+docs/slides/*.out
+docs/slides/*.toc
+docs/slides/*.snm
+
+docs/experiment_report/*.aux
+docs/experiment_report/*.log
+docs/experiment_report/*.out
+docs/experiment_report/*.toc
+docs/experiment_report/*.fls
+docs/experiment_report/*.fdb_latexmk
+docs/experiment_report/*.synctex.gz
+docs/experiment_report/main.pdf
+docs/experiment_report/*.xdv

@@ -3,95 +3,177 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Paper Community Demo</title>
-    <link rel="stylesheet" href="/static/style.css" />
+    <title>论文社区 — 交互演示</title>
+    <link rel="stylesheet" href="/static/style.css?v=webv3-15" />
     <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
   </head>
   <body>
     <div class="app">
       <header class="topbar">
         <div class="brand">
-          <div class="brand-title">Paper Community Demo</div>
-          <div id="health" class="brand-subtitle">loading…</div>
+          <div class="brand-title">论文社区检索与可视化</div>
+          <div id="health" class="brand-subtitle" title="">loading…</div>
+        </div>
+        <div class="topbar-actions mode-switch">
+          <label class="chk"><input type="radio" name="appMode" value="user" checked /> 用户模式</label>
+          <label class="chk"><input type="radio" name="appMode" value="admin" /> 后台模式</label>
         </div>
         <div class="topbar-actions">
-          <button id="btnLoadCommunities" class="btn">Load community graph</button>
+          <button id="btnLoadCommunities" class="btn" type="button">加载全局社区图</button>
+          <button id="btnBackGlobal" class="btn primary" type="button">返回全局社区图</button>
         </div>
       </header>
 
       <main class="main">
-        <section class="panel left">
-          <div class="section">
-            <div class="section-title">Query</div>
+        <section class="panel left" id="panelLeft">
+          <div class="section" id="secUser">
+            <div class="section-title">会话（全时段 all）</div>
+            <div class="row">
+              <select id="selRunId" class="input" title="选择分区算法对应的 run"></select>
+            </div>
+            <div class="row slider-row hidden" id="userResolutionSliderRow" aria-hidden="true">
+              <label for="rngResolution" class="slider-inline-label">分辨率 r</label>
+              <input id="rngResolution" type="range" min="0" max="0" value="0" step="1" />
+              <span id="rngResolutionLabel" class="muted nowrap"></span>
+            </div>
+            <div class="row">
+              <label for="selResolution" class="muted nowrap" style="min-width: 5.5em">分辨率 r</label>
+              <select id="selResolution" class="input" title="列表来自当前 run 目录下的 summary.npy，各算法/目录互不混用"></select>
+            </div>
+            <div class="row">
+              <button id="btnApplySession" class="btn primary" type="button">应用并刷新图</button>
+            </div>
+            <div class="hint">分辨率选项随上方「分区 run」变化；切换 run 或 r 后请点击「应用」。全局社区节点坐标与离线 UMAP 一致。</div>
+
+            <div id="userDomainBlock" class="section-subwrap hidden">
+              <div class="section-subtitle">先聚类（KMeans）子域</div>
+              <div class="row">
+                <select id="domRun" class="input small"></select>
+                <select id="domId" class="input small"></select>
+              </div>
+              <div class="row">
+                <button id="btnDomainView" class="btn" type="button">进入子域散点图</button>
+              </div>
+            </div>
+
+            <div class="section-title">检索</div>
             <div class="tabs">
-              <button class="tab active" data-tab="keyword">Keyword</button>
-              <button class="tab" data-tab="paper">Paper</button>
-              <button class="tab" data-tab="community">Community</button>
+              <button class="tab active" type="button" data-tab="kw">关键词</button>
+              <button class="tab" type="button" data-tab="vec">向量近邻</button>
+              <button class="tab" type="button" data-tab="comm">社区检索</button>
             </div>
-
-            <div class="tab-content" data-tab-content="keyword">
+            <div class="tab-content" data-tab-content="kw">
               <div class="row">
-                <input id="kwInput" class="input" placeholder="e.g. bayesian" />
-                <input id="kwTopK" class="input small" type="number" min="1" max="200" value="20" />
-                <button id="kwSearch" class="btn primary">Search</button>
+                <input id="kwInput" class="input" placeholder="关键词" />
+                <input id="kwTopK" class="input small" type="number" min="1" max="200" value="25" />
               </div>
               <div class="row">
-                <button id="kwPrev" class="btn">Prev</button>
-                <button id="kwNext" class="btn">Next</button>
-                <div id="kwPage" class="muted"></div>
+                <button id="btnKwSearch" class="btn primary" type="button">搜索</button>
               </div>
-              <div class="hint">Uses TF‑IDF if available, otherwise substring fallback.</div>
+              <div class="hint">仅更新下方「检索结果」；当前论文固定在上方。点论文进入该论文所在社区子图。</div>
             </div>
-
-            <div class="tab-content hidden" data-tab-content="paper">
+            <div class="tab-content hidden" data-tab-content="vec">
+              <div class="hint">需先选定当前论文。</div>
               <div class="row">
-                <input id="paperIdInput" class="input" placeholder="paper id (pid)" />
-                <input id="paperK" class="input small" type="number" min="1" max="200" value="20" />
-                <button id="paperLookup" class="btn primary">Lookup</button>
+                <input id="vecTopK" class="input small" type="number" min="1" max="200" value="25" />
+                <button id="btnVecSearch" class="btn primary" type="button" disabled>从当前论文向量近邻</button>
               </div>
-              <div class="hint">Shows neighbors and community summary.</div>
             </div>
-
-            <div class="tab-content hidden" data-tab-content="community">
+            <div class="tab-content hidden" data-tab-content="comm">
+              <div class="hint">使用<strong>上方会话</strong>所选分区 run 与分辨率 r；与关键词检索共用当前论文。</div>
               <div class="row">
-                <input id="commIdInput" class="input" placeholder="community id (cid)" />
-                <input id="commTopPapers" class="input small" type="number" min="1" max="500" value="20" />
-                <button id="commLookup" class="btn primary">Lookup</button>
+                <input id="commTopK" class="input small" type="number" min="1" max="200" value="25" />
+                <button id="btnCommSearch" class="btn primary" type="button" disabled>社区内扩展检索</button>
               </div>
-              <div class="row">
-                <input id="commMaxNodes" class="input small" type="number" min="5" max="500" value="60" />
-                <input id="commMaxEdges" class="input small" type="number" min="10" max="5000" value="200" />
-                <button id="commSubgraph" class="btn">Load subgraph</button>
-              </div>
-              <div class="hint">Load paper subgraph for this community.</div>
             </div>
           </div>
 
+          <div class="section hidden" id="secAdmin">
+            <div class="section-title">后台检索测试</div>
+            <div class="row">
+              <label class="muted nowrap">分区 run</label>
+              <select id="admPartitionRun" class="input"></select>
+            </div>
+            <div class="row">
+              <label class="muted nowrap">通道</label>
+              <select id="admMethod" class="input"></select>
+            </div>
+            <div class="row slider-row hidden" id="adminResolutionSliderRow" aria-hidden="true">
+              <label for="admRngResolution" class="slider-inline-label">分辨率 r</label>
+              <input id="admRngResolution" type="range" min="0" max="0" value="0" step="1" />
+              <span id="admRngResolutionLabel" class="muted nowrap"></span>
+            </div>
+            <div class="row">
+              <label for="admSelResolution" class="muted nowrap" style="min-width: 5.5em">分辨率 r</label>
+              <select id="admSelResolution" class="input" title="随所选分区 run 的 summary.npy"></select>
+            </div>
+            <div class="row">
+              <input id="admSeedPid" class="input small" type="number" min="1" placeholder="论文 pid" />
+              <button id="admRandom" class="btn" type="button">随机论文</button>
+            </div>
+            <div class="row">
+              <input id="admKwSeed" class="input" placeholder="用关键词找种子论文" />
+              <button id="admKwPick" class="btn" type="button">搜索并取首条</button>
+            </div>
+            <div class="row">
+              <input id="admTopK" class="input small" type="number" min="1" max="200" value="20" />
+              <button id="admRunLive" class="btn primary" type="button">运行检索并刷新</button>
+            </div>
+            <div class="hint">中间栏仅展示检索列表；指标在右侧。</div>
+          </div>
+
+          <div class="section" id="currentPaperSection">
+            <div class="section-title">当前论文</div>
+            <div id="currentPaperSlot" class="current-paper-slot"></div>
+          </div>
+
           <div class="section">
-            <div class="section-title">Results</div>
+            <div class="section-title">检索结果</div>
             <div id="results" class="results"></div>
           </div>
         </section>
 
+        <!-- 中栏：用户 / 后台 两套独立结构，互不叠放 -->
         <section class="panel center">
-          <div class="section-title">Graph</div>
-          <div id="cy" class="graph"></div>
-          <div class="graph-footer">
-            <div id="graphMeta" class="muted"></div>
-            <div class="graph-controls">
-              <label class="chk"><input id="toggleLabels" type="checkbox" /> Labels</label>
-              <label class="chk"><input id="toggleEdges" type="checkbox" checked /> Edges</label>
-              <label class="chk">Spread <input id="spread" type="range" min="40" max="220" value="200" /></label>
+          <div id="centerUser" class="center-stack">
+            <div class="section-title">图（UMAP 质心布局）</div>
+            <div id="cy" class="graph"></div>
+            <div id="hoverInfo" class="hover-info muted">将鼠标悬停在节点上查看论文与社区</div>
+            <div class="graph-footer">
+              <div class="graph-footer-main">
+                <div id="graphMeta" class="muted"></div>
+                <div id="graphFooterHint" class="muted graph-footer-hint"></div>
+              </div>
+              <div class="graph-controls">
+                <label class="chk"><input id="toggleEdges" type="checkbox" checked /> 显示边</label>
+                <label class="graph-maxnodes" for="inpGlobalMaxNodes"
+                  >全局社区数上限
+                  <input
+                    id="inpGlobalMaxNodes"
+                    type="number"
+                    min="10"
+                    max="200000"
+                    step="100"
+                    value="1500"
+                    title="对应 API max_nodes；过大可能卡顿"
+                /></label>
+                <button id="btnApplyGlobalMaxNodes" class="btn" type="button">应用上限</button>
+              </div>
             </div>
+          </div>
+
+          <div id="centerAdmin" class="center-stack hidden">
+            <div class="section-title">检索结果列表</div>
+            <div id="adminMiddleList" class="admin-middle-list"></div>
           </div>
         </section>
 
         <section class="panel right">
           <div class="section">
-            <div class="section-title">Details</div>
+            <div class="section-title">详情</div>
             <div id="details" class="details"></div>
             <div class="details-actions">
-              <button id="toggleRaw" class="btn">Raw JSON</button>
+              <button id="toggleRaw" class="btn" type="button">Raw JSON</button>
             </div>
             <pre id="rawJson" class="details raw hidden">{}</pre>
           </div>
@@ -99,7 +181,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=webv3-15"></script>
   </body>
 </html>
-

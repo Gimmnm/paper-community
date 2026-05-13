@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import igraph as ig  # type: ignore
@@ -15,9 +15,9 @@ except ModuleNotFoundError:  # pragma: no cover
     ig = None
 import numpy as np
 
-from checklist import run_embedding_checks, run_model_checks
+from analysis_layer.checklist import run_embedding_checks, run_model_checks
 try:
-    from community import (  # type: ignore
+    from algorithm_layer.community import (  # type: ignore
         induced_subgraph_edge_list,
         leiden_sweep,
         load_membership_for_resolution,
@@ -36,26 +36,46 @@ except Exception:  # pragma: no cover
     rank_communities_by_size = None
     run_hierarchy_sweep = None
 try:
-    from diagram2d import embed_2d, graph_layout_2d, plot_scatter
+    from foundation_layer.diagram2d import embed_2d, graph_layout_2d, plot_scatter
 except Exception:  # pragma: no cover
     embed_2d = None
     graph_layout_2d = None
     plot_scatter = None
 try:
-    from embedding import embed_all_papers
+    from foundation_layer.embedding import embed_all_papers
 except Exception:  # pragma: no cover
     embed_all_papers = None
-from getdata import ingest, load_data
-from model import build_models
-from network import build_or_load_mutual_knn_graph, load_edges_npz
-from project_paths import data_source_paths, embedding_path_specter2, out_dir, REPO_ROOT
-from demo_graph import (
+from foundation_layer.getdata import ingest, load_data
+from foundation_layer.model import build_models
+from foundation_layer.network import build_or_load_mutual_knn_graph, load_edges_npz
+from foundation_layer.project_paths import data_source_paths, embedding_path_specter2, out_dir, REPO_ROOT
+from cli.experiment_subcommands import ExperimentSubcommandHandlers, register_experiment_subparsers
+from data_layer.experiment_contracts import ExperimentRunManifest
+from data_layer.experiment_fallback_cli import experiment_catalog_fallback_manifest
+from data_layer.experiment_registry import build_run_catalog, default_paths_manifest, save_manifest
+from analysis_layer.comparison_breakpoints import (
+    BREAKPOINT_POLICY_V1,
+    infer_sweep_meta,
+    select_comparison_breakpoints,
+    write_breakpoints_run_meta,
+    write_comparison_breakpoints_csv,
+)
+from analysis_layer.eval_bundle import generate_eval_bundles_all
+from analysis_layer.evaluation_metrics import build_evaluation_overview, save_evaluation_overview
+from algorithm_layer.algorithm_pipeline import (
+    build_igraph_from_edges as build_igraph_from_edges_shared,
+    run_coarse_kmeans_then_community_sweep,
+    run_community_sweep,
+    run_community_sweep_time_window,
+)
+from algorithm_layer.coarse_domains_kmeans import kmeans_labels, load_X
+from app_layer.demo_graph import (
     build_demo_graph_from_membership,
     load_membership_for_resolution_light,
     save_demo_graph_json,
     summarize_demo_graph,
 )
-from demo_search import (
+from app_layer.demo_search import (
     build_demo_assets_and_graph,
     expand_from_paper,
     lookup_community,
@@ -64,7 +84,7 @@ from demo_search import (
     search_keyword,
 )
 try:
-    from time_window import analyze_time_window, collect_time_info, make_sliding_window_video
+    from algorithm_layer.time_window import analyze_time_window, collect_time_info, make_sliding_window_video
 except Exception:  # pragma: no cover
     analyze_time_window = None
     collect_time_info = None
@@ -73,6 +93,7 @@ except Exception:  # pragma: no cover
 
 BASE_DIR = REPO_ROOT
 SRC_DIR = Path(__file__).resolve().parent
+ANALYSIS_LAYER_DIR = SRC_DIR / "analysis_layer"
 _DATA = data_source_paths(BASE_DIR)
 DATA_DIR = _DATA.data_dir
 OUT_DIR = out_dir(BASE_DIR)
@@ -118,16 +139,17 @@ def build_or_load_embeddings(
     prefer_gpu: bool = False,
     force: bool = False,
 ) -> np.ndarray:
+    emb_path = Path(emb_path)
+    # 已有 npy 时只依赖 numpy，不要求 torch/transformers（experiment-sweep 等可离线跑）
+    if emb_path.exists() and not force:
+        embs = np.load(emb_path, mmap_mode="r")
+        print("[emb] loaded from disk:", embs.shape, embs.dtype, "example:", embs[1, :5])
+        return embs
     _require_callable(
         embed_all_papers,
         name="embed_all_papers",
         install_hint="pip install -r requirements.txt  # (or install torch + transformers deps required by embedding)",
     )
-    emb_path = Path(emb_path)
-    if emb_path.exists() and not force:
-        embs = np.load(emb_path, mmap_mode="r")
-        print("[emb] loaded from disk:", embs.shape, embs.dtype, "example:", embs[1, :5])
-        return embs
     embs = embed_all_papers(
         papers=papers,
         out_npy_path=str(emb_path),
@@ -201,13 +223,7 @@ def build_or_load_global_graph(
 
 
 def build_igraph_from_edge_triplets(n_nodes: int, u: np.ndarray, v: np.ndarray, w: np.ndarray) -> ig.Graph:
-    if ig is None:  # pragma: no cover
-        raise ImportError(
-            "需要 python-igraph 才能构建 igraph 对象：pip install python-igraph"
-        )
-    G = ig.Graph(n=int(n_nodes), edges=list(zip(u.tolist(), v.tolist())), directed=False)
-    G.es["weight"] = np.asarray(w, dtype=np.float32).astype(float).tolist()
-    return G
+    return build_igraph_from_edges_shared(n_nodes=n_nodes, u=u, v=v, w=w)
 
 
 # -----------------------------------------------------------------------------
@@ -216,7 +232,7 @@ def build_igraph_from_edge_triplets(n_nodes: int, u: np.ndarray, v: np.ndarray, 
 
 
 def task_demo_graph(args: argparse.Namespace) -> Dict[str, Any]:
-    authors, papers, data = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
+    _, papers, _data = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
 
     leiden_dir = Path(args.leiden_dir)
     membership = load_membership_for_resolution_light(leiden_dir, float(args.resolution), allow_nearest=True)
@@ -279,7 +295,7 @@ def _demo_common_paths(args: argparse.Namespace) -> Dict[str, Path]:
 
 
 def task_demo_keyword(args: argparse.Namespace) -> Dict[str, Any]:
-    _, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
+    authors, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
     paths = _demo_common_paths(args)
     assets, g = build_demo_assets_and_graph(
         base_dir=BASE_DIR,
@@ -289,7 +305,7 @@ def task_demo_keyword(args: argparse.Namespace) -> Dict[str, Any]:
         graph_npz=paths["graph_npz"],
         keyword_index_dir=paths["keyword_index_dir"],
     )
-    res = search_keyword(assets=assets, papers=papers, graph=g, query=str(args.query), top_k=int(args.top_k))
+    res = search_keyword(assets=assets, papers=papers, graph=g, query=str(args.query), top_k=int(args.top_k), authors=authors)
     print(json.dumps(res, ensure_ascii=False, indent=2) if args.pretty else json.dumps(res, ensure_ascii=False))
     if args.save_json:
         save_result_json(res, Path(args.save_json))
@@ -298,7 +314,7 @@ def task_demo_keyword(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_demo_paper(args: argparse.Namespace) -> Dict[str, Any]:
-    _, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
+    authors, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
     paths = _demo_common_paths(args)
     assets, g = build_demo_assets_and_graph(
         base_dir=BASE_DIR,
@@ -316,6 +332,7 @@ def task_demo_paper(args: argparse.Namespace) -> Dict[str, Any]:
         k_neighbors=int(args.k_neighbors),
         k_neighbors_in_comm=int(args.k_neighbors_in_comm),
         k_neighbor_comms=int(args.k_neighbor_comms),
+        authors=authors,
     )
     print(json.dumps(res, ensure_ascii=False, indent=2) if args.pretty else json.dumps(res, ensure_ascii=False))
     if args.save_json:
@@ -325,7 +342,7 @@ def task_demo_paper(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_demo_community(args: argparse.Namespace) -> Dict[str, Any]:
-    _, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
+    authors, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
     paths = _demo_common_paths(args)
     _, g = build_demo_assets_and_graph(
         base_dir=BASE_DIR,
@@ -341,6 +358,7 @@ def task_demo_community(args: argparse.Namespace) -> Dict[str, Any]:
         cid=int(args.cid),
         top_papers=int(args.top_papers),
         top_neighbors=int(args.top_neighbors),
+        authors=authors,
     )
     print(json.dumps(res, ensure_ascii=False, indent=2) if args.pretty else json.dumps(res, ensure_ascii=False))
     if args.save_json:
@@ -350,7 +368,7 @@ def task_demo_community(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_demo_expand(args: argparse.Namespace) -> Dict[str, Any]:
-    _, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
+    authors, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
     paths = _demo_common_paths(args)
     assets, g = build_demo_assets_and_graph(
         base_dir=BASE_DIR,
@@ -367,6 +385,7 @@ def task_demo_expand(args: argparse.Namespace) -> Dict[str, Any]:
         pid=int(args.pid),
         k_papers=int(args.k_papers),
         k_comms=int(args.k_comms),
+        authors=authors,
     )
     print(json.dumps(res, ensure_ascii=False, indent=2) if args.pretty else json.dumps(res, ensure_ascii=False))
     if args.save_json:
@@ -379,7 +398,7 @@ def task_demo_regress(args: argparse.Namespace) -> Dict[str, Any]:
     """
     最小回归：验证四个入口都能跑通，且关键字段存在。
     """
-    _, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
+    authors, papers, _ = build_or_load(exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)))
     paths = _demo_common_paths(args)
     assets, g = build_demo_assets_and_graph(
         base_dir=BASE_DIR,
@@ -393,7 +412,7 @@ def task_demo_regress(args: argparse.Namespace) -> Dict[str, Any]:
     out: Dict[str, Any] = {"checks": []}
 
     # 1) keyword
-    kw = search_keyword(assets=assets, papers=papers, graph=g, query=str(args.query), top_k=int(args.top_k))
+    kw = search_keyword(assets=assets, papers=papers, graph=g, query=str(args.query), top_k=int(args.top_k), authors=authors)
     assert kw["type"] == "keyword"
     assert "hits" in kw and isinstance(kw["hits"], list)
     out["checks"].append({"name": "keyword", "ok": True, "n_hits": len(kw["hits"]), "mode": kw.get("debug", {}).get("mode")})
@@ -407,7 +426,16 @@ def task_demo_regress(args: argparse.Namespace) -> Dict[str, Any]:
             pid = 1
 
     # 2) paper
-    pr = lookup_paper(assets=assets, papers=papers, graph=g, pid=pid, k_neighbors=10, k_neighbors_in_comm=5, k_neighbor_comms=5)
+    pr = lookup_paper(
+        assets=assets,
+        papers=papers,
+        graph=g,
+        pid=pid,
+        k_neighbors=10,
+        k_neighbors_in_comm=5,
+        k_neighbor_comms=5,
+        authors=authors,
+    )
     assert pr["type"] == "paper"
     assert pr["hits"] and pr["hits"][0]["payload"].get("pid") == pid
     out["checks"].append({"name": "paper", "ok": True, "pid": pid, "community": pr["hits"][0]["payload"].get("community")})
@@ -416,13 +444,13 @@ def task_demo_regress(args: argparse.Namespace) -> Dict[str, Any]:
     cid = pr["hits"][0]["payload"].get("community")
     if cid is None:
         cid = 0
-    cr = lookup_community(papers=papers, graph=g, cid=int(cid), top_papers=10, top_neighbors=5)
+    cr = lookup_community(papers=papers, graph=g, cid=int(cid), top_papers=10, top_neighbors=5, authors=authors)
     assert cr["type"] == "community"
     assert cr["hits"] and cr["hits"][0]["payload"].get("cid") == int(cid)
     out["checks"].append({"name": "community", "ok": True, "cid": int(cid), "size": cr["hits"][0]["payload"].get("size")})
 
     # 4) expand
-    ex = expand_from_paper(assets=assets, papers=papers, graph=g, pid=pid, k_papers=10, k_comms=5)
+    ex = expand_from_paper(assets=assets, papers=papers, graph=g, pid=pid, k_papers=10, k_comms=5, authors=authors)
     assert ex["type"] == "expand"
     assert ex["hits"] and ex["hits"][0]["kind"] == "paper"
     out["checks"].append({"name": "expand", "ok": True, "n_hits": len(ex["hits"])})
@@ -453,8 +481,13 @@ def task_demo_api(args: argparse.Namespace) -> Dict[str, Any]:
         os.environ.pop("PC_EXCLUDE_SELFCITE", None)
     if getattr(args, "cors_origins", None):
         os.environ["PC_CORS_ORIGINS"] = str(args.cors_origins)
+    tc = getattr(args, "topic_communities_csv", None)
+    if tc:
+        os.environ["PC_TOPIC_COMMUNITIES_CSV"] = str(Path(tc).resolve())
+    else:
+        os.environ.pop("PC_TOPIC_COMMUNITIES_CSV", None)
 
-    import demo_api_app
+    import app_layer.demo_api_app as demo_api_app
 
     print(f"[demo-api] docs: http://{args.host}:{args.port}/docs")
     uvicorn.run(
@@ -1161,7 +1194,7 @@ def task_time_video(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_keyword_index(args: argparse.Namespace) -> Dict[str, Any]:
-    from retrieval import KeywordIndexConfig, build_or_load_keyword_index
+    from app_layer.retrieval import KeywordIndexConfig, build_or_load_keyword_index
 
     _, papers, _ = build_or_load(exclude_selfcite=args.exclude_selfcite, force_reingest=args.force_reingest)
     cfg = KeywordIndexConfig(
@@ -1179,7 +1212,7 @@ def task_keyword_index(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_keyword_search(args: argparse.Namespace) -> Dict[str, Any]:
-    from retrieval import KeywordIndexConfig, search_keywords
+    from app_layer.retrieval import KeywordIndexConfig, search_keywords
 
     _, papers, _ = build_or_load(exclude_selfcite=args.exclude_selfcite, force_reingest=args.force_reingest)
     cfg = KeywordIndexConfig(
@@ -1218,7 +1251,7 @@ def task_keyword_search(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_topic_model(args: argparse.Namespace) -> Dict[str, Any]:
-    import topic_modeling as tm
+    from analysis_layer import topic_modeling as tm
 
     out_dir = Path(args.out_dir) if args.out_dir else (OUT_DIR / "topic_modeling" / f"K{args.k_topics}" / f"r{float(args.resolution):.4f}")
     meta_path = out_dir / "topic_model_meta.json"
@@ -1274,10 +1307,14 @@ def task_topic_model(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_topic_model_multi(args: argparse.Namespace) -> Dict[str, Any]:
-    cmd = [sys.executable, str(SRC_DIR / "topic_modeling_multi.py"), "--k", str(args.k_topics)]
+    cmd = [sys.executable, str(ANALYSIS_LAYER_DIR / "topic_modeling_multi.py"), "--k", str(args.k_topics)]
     cmd += ["--leiden-dir", str(args.leiden_dir)]
     if args.out_root:
         cmd += ["--out-root", str(args.out_root)]
+    if getattr(args, "breakpoints_csv", None):
+        cmd += ["--breakpoints-csv", str(args.breakpoints_csv)]
+        cmd += ["--breakpoint-run-id", str(args.breakpoint_run_id)]
+        cmd += ["--breakpoint-time-window", str(args.breakpoint_time_window)]
     if args.r_min is not None:
         cmd += ["--r-min", str(args.r_min)]
     if args.r_max is not None:
@@ -1294,11 +1331,13 @@ def task_topic_model_multi(args: argparse.Namespace) -> Dict[str, Any]:
         cmd += ["--continue-on-error"]
     if args.quiet:
         cmd += ["--quiet"]
+    if getattr(args, "rep_papers_mode", None):
+        cmd += ["--rep-papers-mode", str(args.rep_papers_mode)]
     return _subprocess_run(cmd)
 
 
 def task_align_topics(args: argparse.Namespace) -> Dict[str, Any]:
-    cmd = [sys.executable, str(SRC_DIR / "align_topics_multires.py"), "--k", str(args.k_topics)]
+    cmd = [sys.executable, str(ANALYSIS_LAYER_DIR / "align_topics_multires.py"), "--k", str(args.k_topics)]
     if args.topic_root:
         cmd += ["--topic-root", str(args.topic_root)]
     if args.out_root:
@@ -1328,7 +1367,7 @@ def task_align_topics(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_align_topics_segmented(args: argparse.Namespace) -> Dict[str, Any]:
-    cmd = [sys.executable, str(SRC_DIR / "align_topics_multires_segmented.py"), "--k", str(args.k_topics)]
+    cmd = [sys.executable, str(ANALYSIS_LAYER_DIR / "align_topics_multires_segmented.py"), "--k", str(args.k_topics)]
     if args.topic_root:
         cmd += ["--topic-root", str(args.topic_root)]
     if args.out_root:
@@ -1363,7 +1402,7 @@ def task_align_topics_segmented(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_topic_viz(args: argparse.Namespace) -> Dict[str, Any]:
-    cmd = [sys.executable, str(SRC_DIR / "topic_visualization_multires.py"), "--k", str(args.k_topics)]
+    cmd = [sys.executable, str(ANALYSIS_LAYER_DIR / "topic_visualization_multires.py"), "--k", str(args.k_topics)]
     if args.leiden_dir:
         cmd += ["--leiden-dir", str(args.leiden_dir)]
     if args.topic_root:
@@ -1405,7 +1444,7 @@ def task_topic_viz(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_diagnose_topic_collapse(args: argparse.Namespace) -> Dict[str, Any]:
-    cmd = [sys.executable, str(SRC_DIR / "diagnose_topic_collapse.py")]
+    cmd = [sys.executable, str(ANALYSIS_LAYER_DIR / "diagnose_topic_collapse.py")]
     if args.input:
         cmd += ["--input", str(args.input)]
     if args.root:
@@ -1422,7 +1461,7 @@ def task_diagnose_topic_collapse(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def task_frames_to_mp4(args: argparse.Namespace) -> Dict[str, Any]:
-    cmd = [sys.executable, str(SRC_DIR / "frames_to_mp4.py")]
+    cmd = [sys.executable, str(ANALYSIS_LAYER_DIR / "frames_to_mp4.py")]
     if args.batch_subdirs:
         cmd += ["--batch-subdirs", "--root", str(args.root)]
         if args.subdir_glob:
@@ -1441,6 +1480,631 @@ def task_frames_to_mp4(args: argparse.Namespace) -> Dict[str, Any]:
     if args.quiet:
         cmd += ["--quiet"]
     return _subprocess_run(cmd)
+
+
+def task_experiment_manifest(args: argparse.Namespace) -> Dict[str, Any]:
+    run_id = str(args.run_id).strip()
+    if not run_id:
+        raise ValueError("--run-id is required")
+    m = ExperimentRunManifest(
+        run_id=run_id,
+        algorithm=str(args.algorithm),  # type: ignore[arg-type]
+        time_window=str(args.time_window),  # type: ignore[arg-type]
+        title=str(args.title or run_id),
+        leiden_dir=str(Path(args.leiden_dir)),
+        graph_npz=str(Path(args.graph_npz)),
+        keyword_index_dir=None if not args.keyword_index_dir else str(Path(args.keyword_index_dir)),
+        coords_2d_path=None if not args.coords_2d_path else str(Path(args.coords_2d_path)),
+        topic_communities_csv=(
+            None if not getattr(args, "topic_communities_csv", None) else str(Path(args.topic_communities_csv))
+        ),
+        default_resolution=float(args.default_resolution),
+        partition_type=None if not args.partition_type else str(args.partition_type),
+        tags={},
+    )
+    p = save_manifest(BASE_DIR, m)
+    return {"run_id": run_id, "manifest_path": str(p)}
+
+
+def task_experiment_catalog(args: argparse.Namespace) -> Dict[str, Any]:
+    fallback = experiment_catalog_fallback_manifest(BASE_DIR, args)
+    cat = build_run_catalog(base_dir=BASE_DIR, fallback=fallback)
+    rows = [x.to_json_dict() for x in cat.values()]
+    rows.sort(key=lambda x: (str(x.get("algorithm")), str(x.get("time_window")), str(x.get("run_id"))))
+    if args.pretty:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(rows, ensure_ascii=False))
+    return {"n_runs": len(rows), "runs": rows}
+
+
+def task_experiment_sweep(args: argparse.Namespace) -> Dict[str, Any]:
+    _, papers, _ = build_or_load(
+        exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)),
+        force_reingest=bool(getattr(args, "force_reingest", False)),
+    )
+    embs = build_or_load_embeddings(
+        papers,
+        emb_path=Path(args.emb_path),
+        batch_size=int(args.batch_size),
+        prefer_gpu=bool(args.prefer_gpu),
+        force=bool(getattr(args, "force", False)),
+    )
+    _, (u, v, w) = build_or_load_global_graph(
+        embs,
+        out_dir=OUT_DIR,
+        k=int(args.k),
+        knn_backend=str(args.knn_backend),
+        knn_batch_size=int(args.knn_batch_size),
+        cache_name=args.cache_name,
+        force=bool(getattr(args, "force", False)),
+    )
+    g = build_igraph_from_edge_triplets(n_nodes=int(len(papers) - 1), u=u, v=v, w=w)
+    out_dir = Path(args.out_dir)
+    run_community_sweep(
+        g=g,
+        out_dir=out_dir,
+        algorithm=str(args.algorithm),
+        r_min=float(args.r_min),
+        r_max=float(args.r_max),
+        step=float(args.step),
+        include=args.include,
+        seed=int(args.seed),
+        resolution_mode=str(args.resolution_mode),
+        partition_type=args.partition_type,
+        reuse_existing=not bool(getattr(args, "no_reuse_existing", False)),
+        verbose=not bool(args.quiet),
+    )
+    return {"algorithm": args.algorithm, "out_dir": str(out_dir)}
+
+
+def task_experiment_coarse_kmeans_sweep(args: argparse.Namespace) -> Dict[str, Any]:
+    """
+    embedding 上 k-means 粗分 domain → 每个 domain 在 **全局 mutual-kNN** 上的诱导子图跑与 ``experiment-sweep``
+    相同的社区算法 → 合并为全图 ``membership_r*.npy``（社区 id 按 domain 偏移拼接）。
+    """
+    _, papers, _ = build_or_load(
+        exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)),
+        force_reingest=bool(getattr(args, "force_reingest", False)),
+    )
+    n_expect = int(len(papers) - 1)
+    u, v, w, n_nodes, _k0, _norm = load_edges_npz(Path(args.graph_npz))
+    if int(n_nodes) != n_expect:
+        raise ValueError(f"graph n_nodes={n_nodes} != papers-1={n_expect}")
+
+    domains_dir = getattr(args, "domains_dir", None)
+    kmeans_meta: Dict[str, Any]
+    if domains_dir:
+        dd = Path(domains_dir)
+        labels = np.load(dd / "labels.npy").astype(np.int32).reshape(-1)
+        meta_path = dd / "meta.json"
+        if meta_path.is_file():
+            kmeans_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        else:
+            kmeans_meta = {}
+        if int(labels.shape[0]) != n_expect:
+            raise ValueError(f"{dd}/labels.npy length {labels.shape[0]} != {n_expect}")
+        uids = np.unique(labels)
+        domain_vertex_indices = [np.where(labels == uid)[0].astype(np.int64) for uid in uids]
+        kmeans_meta = {
+            **kmeans_meta,
+            "domains_dir": str(dd.resolve()),
+            "labels_npy": str((dd / "labels.npy").resolve()),
+            "n_domains": int(uids.size),
+            "domain_ids": [int(x) for x in uids.tolist()],
+        }
+    else:
+        X = load_X(Path(args.emb_path))
+        if int(X.shape[0]) != n_expect:
+            raise ValueError(f"embeddings rows {X.shape[0]} != {n_expect}")
+        kk = int(args.k)
+        sd = int(args.seed)
+        labels = kmeans_labels(X, k=kk, seed=sd)
+        uids = np.unique(labels)
+        domain_vertex_indices = [np.where(labels == uid)[0].astype(np.int64) for uid in uids]
+        out_dom = Path(args.out_dir)
+        out_dom.mkdir(parents=True, exist_ok=True)
+        np.save(out_dom / "labels.npy", labels.astype(np.int32))
+        kmeans_meta = {
+            "k": kk,
+            "seed": sd,
+            "emb_npy": str(Path(args.emb_path).resolve()),
+            "method": "MiniBatchKMeans",
+            "n_domains": int(uids.size),
+            "domain_ids": [int(x) for x in uids.tolist()],
+            "labels_npy": str((out_dom / "labels.npy").resolve()),
+        }
+        (out_dom / "coarse_kmeans_inline_meta.json").write_text(
+            json.dumps(kmeans_meta, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    out_dir = Path(args.out_dir)
+    inner_algo = str(args.algorithm)
+    res = run_coarse_kmeans_then_community_sweep(
+        n_nodes=int(n_nodes),
+        u=u,
+        v=v,
+        w=w,
+        domain_vertex_indices=domain_vertex_indices,
+        out_dir=out_dir,
+        algorithm=inner_algo,
+        r_min=float(args.r_min),
+        r_max=float(args.r_max),
+        step=float(args.step),
+        include=list(args.include) if getattr(args, "include", None) else None,
+        seed=int(args.seed),
+        partition_type=args.partition_type,
+        resolution_mode=str(args.resolution_mode),
+        reuse_existing=not bool(args.force),
+        verbose=not bool(args.quiet),
+        kmeans_meta=kmeans_meta,
+    )
+
+    if domains_dir:
+        _src_lbl = Path(domains_dir) / "labels.npy"
+        _dst_lbl = Path(args.out_dir) / "labels.npy"
+        if _src_lbl.is_file():
+            shutil.copy2(_src_lbl, _dst_lbl)
+
+    if bool(getattr(args, "write_manifest", False)):
+        rid = str(args.run_id).strip() or "coarse_kmeans"
+        ptype = (
+            "CPMVertexPartition"
+            if inner_algo == "leiden_cpm"
+            else ("RBConfigurationVertexPartition" if inner_algo == "leiden" else None)
+        )
+        topic_csv = str(Path(args.topic_communities_csv)) if getattr(args, "topic_communities_csv", None) else None
+        m = ExperimentRunManifest(
+            run_id=rid,
+            algorithm="coarse_kmeans",  # type: ignore[arg-type]
+            time_window="all",
+            title=f"coarse k-means + {inner_algo}",
+            leiden_dir=str(out_dir.resolve()),
+            graph_npz=str(Path(args.graph_npz).resolve()),
+            keyword_index_dir=str(Path(args.keyword_index_dir).resolve()) if args.keyword_index_dir else None,
+            coords_2d_path=str(Path(args.coords_2d_path).resolve()) if args.coords_2d_path else None,
+            topic_communities_csv=topic_csv,
+            default_resolution=float(args.default_resolution),
+            partition_type=ptype,
+            tags={"inner_algorithm": inner_algo, "pipeline": "coarse_kmeans_then_community_sweep"},
+        )
+        save_manifest(BASE_DIR, m)
+        res["manifest_saved"] = True
+        res["manifest_run_id"] = rid
+
+    merged = res.pop("merged_results", {})
+    stats: List[Dict[str, Any]] = []
+    for rr in sorted(merged.keys()):
+        v = merged[rr]
+        q = float(v["quality"])
+        stats.append(
+            {
+                "resolution": float(rr),
+                "n_communities": int(v["n_comm"]),
+                "quality": q if np.isfinite(q) else None,
+                "time_sec": float(v["time"]),
+            }
+        )
+    out_json: Dict[str, Any] = {
+        "out_dir": res["out_dir"],
+        "n_domains": res["n_domains"],
+        "resolutions": res["resolutions"],
+        "inner_algorithm": inner_algo,
+        "merged_resolution_stats": stats,
+    }
+    if res.get("manifest_saved"):
+        out_json["manifest_saved"] = True
+        out_json["manifest_run_id"] = res["manifest_run_id"]
+    return out_json
+
+
+def task_experiment_sweep_time_window(args: argparse.Namespace) -> Dict[str, Any]:
+    """
+    Restrict to ``[start_year, end_year]`` by publication year, rebuild mutual-kNN on that subset's
+    embeddings, run the same resolution sweep as ``experiment-sweep``, then expand memberships to
+    full-corpus length (``-1`` outside the window) and save a **global** ``mutual_knn_k*.npz`` for the demo.
+    """
+    _require_callable(
+        collect_time_info,
+        name="collect_time_info",
+        install_hint="pip install -r requirements.txt",
+    )
+    _, papers, _ = build_or_load(
+        exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)),
+        force_reingest=bool(getattr(args, "force_reingest", False)),
+    )
+    embs = build_or_load_embeddings(
+        papers,
+        emb_path=Path(args.emb_path),
+        batch_size=int(args.batch_size),
+        prefer_gpu=bool(args.prefer_gpu),
+        force=bool(getattr(args, "force", False)),
+    )
+    time_info = collect_time_info(papers, out_dir=OUT_DIR / "time_info", verbose=not bool(args.quiet))
+    years = np.asarray(time_info["years_by_idx0"], dtype=np.int32)
+    out_dir = Path(args.out_dir) if args.out_dir else OUT_DIR / f"leiden_sweep_{args.algorithm}_y{int(args.start_year)}_{int(args.end_year)}"
+    include_list: Optional[List[float]] = list(args.include) if getattr(args, "include", None) else None
+    res = run_community_sweep_time_window(
+        papers=list(papers),
+        embs=np.asarray(embs),
+        years_by_idx0=years,
+        start_year=int(args.start_year),
+        end_year=int(args.end_year),
+        out_dir=out_dir,
+        algorithm=str(args.algorithm),
+        r_min=float(args.r_min),
+        r_max=float(args.r_max),
+        step=float(args.step),
+        include=include_list,
+        k=int(args.k),
+        knn_backend=str(args.knn_backend),
+        knn_batch_size=int(args.knn_batch_size),
+        seed=int(args.seed),
+        partition_type=args.partition_type,
+        resolution_mode=str(args.resolution_mode),
+        include_unknown_year=bool(getattr(args, "include_unknown_year", False)),
+        reuse_existing=not bool(args.force),
+        verbose=not bool(args.quiet),
+    )
+    if bool(getattr(args, "write_manifest", False)):
+        tw = (
+            f"y{int(args.start_year)}_{int(args.end_year)}"
+            if int(args.start_year) != int(args.end_year)
+            else f"y{int(args.start_year)}"
+        )
+        rid = str(args.run_id).strip() or f"{args.algorithm}_{tw}"
+        global_npz = out_dir / f"mutual_knn_k{int(args.k)}.npz"
+        m = ExperimentRunManifest(
+            run_id=rid,
+            algorithm=str(args.algorithm),  # type: ignore[arg-type]
+            time_window=str(tw),
+            title=f"{args.algorithm} refit {tw}",
+            leiden_dir=str(out_dir.resolve()),
+            graph_npz=str(global_npz.resolve()),
+            keyword_index_dir=str(Path(args.keyword_index_dir).resolve()) if args.keyword_index_dir else None,
+            coords_2d_path=str(Path(args.coords_2d_path).resolve()) if args.coords_2d_path else None,
+            default_resolution=float(args.default_resolution),
+            partition_type=(
+                "CPMVertexPartition"
+                if args.algorithm == "leiden_cpm"
+                else ("RBConfigurationVertexPartition" if args.algorithm == "leiden" else None)
+            ),
+            tags={
+                "kind": "window_refit_sweep",
+                "start_year": int(args.start_year),
+                "end_year": int(args.end_year),
+            },
+        )
+        save_manifest(BASE_DIR, m)
+        res["manifest_saved"] = True
+        res["manifest_run_id"] = str(m.run_id)
+    return res
+
+
+def _parse_publication_year_window(spec: str) -> Tuple[int, int]:
+    s = str(spec).strip().replace("-", ":")
+    parts = s.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"window must be START:END or START-END (inclusive years), got {spec!r}")
+    y0, y1 = int(parts[0].strip()), int(parts[1].strip())
+    if y1 < y0:
+        y0, y1 = y1, y0
+    return int(y0), int(y1)
+
+
+def task_experiment_batch_time_windows(args: argparse.Namespace) -> Dict[str, Any]:
+    """
+    Run ``experiment-sweep-time-window`` for each ``--window`` and always ``--write-manifest``.
+    Each run gets its own ``out_dir`` / ``leiden_dir`` / ``graph_npz`` so the web demo can switch
+    runs and see different community structure (after Apply).
+    """
+    specs = list(args.window or [])
+    if not specs:
+        raise SystemExit("experiment-batch-time-windows: pass at least one --window Y0:Y1")
+
+    results: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+
+    for spec in specs:
+        y0, y1 = _parse_publication_year_window(spec)
+        tw_tag = f"y{y0}_{y1}" if y0 != y1 else f"y{y0}"
+        out_dir: Optional[str] = None
+        if getattr(args, "out_root", None):
+            out_dir = str(Path(args.out_root).resolve() / tw_tag)
+
+        prefix = str(getattr(args, "run_id_prefix", "") or "").strip()
+        run_id = f"{prefix}_{args.algorithm}_{tw_tag}" if prefix else ""
+        inner = argparse.Namespace(
+            exclude_selfcite=bool(getattr(args, "exclude_selfcite", False)),
+            force_reingest=bool(getattr(args, "force_reingest", False)),
+            force=bool(getattr(args, "force", False)),
+            start_year=y0,
+            end_year=y1,
+            include_unknown_year=bool(getattr(args, "include_unknown_year", False)),
+            algorithm=str(args.algorithm),
+            emb_path=str(args.emb_path),
+            batch_size=int(args.batch_size),
+            prefer_gpu=bool(getattr(args, "prefer_gpu", False)),
+            k=int(args.k),
+            knn_backend=str(args.knn_backend),
+            knn_batch_size=int(args.knn_batch_size),
+            out_dir=out_dir,
+            r_min=float(args.r_min),
+            r_max=float(args.r_max),
+            step=float(args.step),
+            include=list(args.include) if getattr(args, "include", None) else None,
+            seed=int(args.seed),
+            resolution_mode=str(args.resolution_mode),
+            partition_type=args.partition_type,
+            quiet=bool(getattr(args, "quiet", False)),
+            write_manifest=True,
+            run_id=run_id,
+            keyword_index_dir=str(args.keyword_index_dir) if args.keyword_index_dir else None,
+            coords_2d_path=str(args.coords_2d_path) if args.coords_2d_path else None,
+            default_resolution=float(args.default_resolution),
+        )
+        try:
+            one = task_experiment_sweep_time_window(inner)
+            results.append({"window": spec, "start_year": y0, "end_year": y1, **one})
+        except Exception as e:
+            err_row = {"window": spec, "start_year": y0, "end_year": y1, "error": f"{type(e).__name__}: {e}"}
+            if bool(getattr(args, "continue_on_error", False)):
+                errors.append(err_row)
+            else:
+                raise
+    summary = {"n_ok": len(results), "n_err": len(errors), "results": results, "errors": errors}
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return summary
+
+
+def _comparison_run_tags_from_args(args: argparse.Namespace) -> Optional[List[str]]:
+    tags = getattr(args, "comparison_run_tag", None)
+    if not tags:
+        return None
+    out = [str(t).strip() for t in tags if str(t).strip()]
+    return out or None
+
+
+def task_experiment_eval(args: argparse.Namespace) -> Dict[str, Any]:
+    from analysis_layer.retrieval_sixway_aggregate import write_retrieval_sixway_for_repo
+
+    fallback = experiment_catalog_fallback_manifest(BASE_DIR, args)
+    cat = build_run_catalog(base_dir=BASE_DIR, fallback=fallback)
+    manifests = list(cat.values())
+    bundle = build_evaluation_overview(
+        manifests,
+        repo_root=BASE_DIR,
+        comparison_run_tags=_comparison_run_tags_from_args(args),
+    )
+    paths = save_evaluation_overview(out_dir=Path(args.out_dir), bundle=bundle)
+    out: Dict[str, Any] = {"n_runs": len(manifests), "saved": paths}
+    if not bool(getattr(args, "no_retrieval_sixway", False)):
+        out["retrieval_sixway"] = write_retrieval_sixway_for_repo(
+            BASE_DIR,
+            Path(args.out_dir),
+            _comparison_run_tags_from_args(args),
+            plot_rankings=not bool(getattr(args, "no_sixway_plots", False)),
+        )
+    return out
+
+
+def task_experiment_retrieval_sixway(args: argparse.Namespace) -> Dict[str, Any]:
+    from analysis_layer.retrieval_sixway_aggregate import write_retrieval_sixway_for_repo
+
+    return write_retrieval_sixway_for_repo(
+        BASE_DIR,
+        Path(args.out_dir),
+        _comparison_run_tags_from_args(args),
+        plot_rankings=not bool(getattr(args, "no_sixway_plots", False)),
+    )
+
+
+def task_experiment_eval_bundle(args: argparse.Namespace) -> Dict[str, Any]:
+    fallback = experiment_catalog_fallback_manifest(BASE_DIR, args)
+    cat = build_run_catalog(base_dir=BASE_DIR, fallback=fallback)
+    manifests = list(cat.values())
+    filt: Optional[Tuple[str, ...]] = tuple(str(x) for x in args.run_id) if args.run_id else None
+    gen = generate_eval_bundles_all(
+        manifests,
+        force=bool(args.force),
+        skip_existing=bool(args.skip_existing),
+        with_layered=not bool(args.no_layered),
+        max_layered_resolutions=int(args.max_layered_resolutions),
+        run_id_filter=filt,
+    )
+    overview_saved = None
+    if bool(args.also_overview):
+        from analysis_layer.retrieval_sixway_aggregate import write_retrieval_sixway_for_repo
+
+        bundle = build_evaluation_overview(
+            manifests,
+            repo_root=BASE_DIR,
+            comparison_run_tags=_comparison_run_tags_from_args(args),
+        )
+        overview_saved = save_evaluation_overview(out_dir=Path(args.overview_out_dir), bundle=bundle)
+        if not bool(getattr(args, "no_retrieval_sixway", False)):
+            overview_saved = {
+                **overview_saved,
+                "retrieval_sixway": write_retrieval_sixway_for_repo(
+                    BASE_DIR,
+                    Path(args.overview_out_dir),
+                    _comparison_run_tags_from_args(args),
+                    plot_rankings=not bool(getattr(args, "no_sixway_plots", False)),
+                ),
+            }
+    return {**gen, "overview_saved": overview_saved}
+
+
+def task_experiment_comparison_breakpoints(args: argparse.Namespace) -> Dict[str, Any]:
+    fallback = experiment_catalog_fallback_manifest(BASE_DIR, args)
+    cat = build_run_catalog(base_dir=BASE_DIR, fallback=fallback)
+    manifests = list(cat.values())
+    filt: Optional[Tuple[str, ...]] = tuple(str(x) for x in args.run_id) if args.run_id else None
+    k = int(args.n_breakpoints)
+    rows_out: List[Dict[str, Any]] = []
+    n_contributed = 0
+    for m in manifests:
+        if filt is not None and str(m.run_id) not in filt:
+            continue
+        ld = Path(m.leiden_dir)
+        sp = ld / "summary.npy"
+        if not sp.is_file():
+            continue
+        try:
+            summary = np.load(sp, allow_pickle=True).item()
+        except Exception:
+            continue
+        picks = select_comparison_breakpoints(summary, k=k)
+        if picks:
+            n_contributed += 1
+        for pr in picks:
+            row = {"run_id": m.run_id, "algorithm": m.algorithm, "time_window": m.time_window}
+            row.update(pr)
+            rows_out.append(row)
+    out_csv = Path(args.out_csv)
+    write_comparison_breakpoints_csv(out_csv, rows_out)
+    meta_path = Path(args.meta_json)
+    write_breakpoints_run_meta(meta_path, n_breakpoints=k, n_runs=n_contributed)
+    return {"n_rows": len(rows_out), "n_manifests": n_contributed, "csv": str(out_csv), "meta": str(meta_path)}
+
+
+def task_experiment_retrieval_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
+    from analysis_layer.retrieval_benchmark import run_retrieval_benchmark
+
+    return run_retrieval_benchmark(args)
+
+
+def task_experiment_viz_batch(args: argparse.Namespace) -> Dict[str, Any]:
+    from analysis_layer.viz_batch import run_viz_batch
+
+    return run_viz_batch(args)
+
+
+def task_experiment_init_minimal(args: argparse.Namespace) -> Dict[str, Any]:
+    """
+    Register minimal run manifests for:
+      algorithms: leiden / leiden_cpm / louvain / coarse_kmeans
+
+    Default (phase-1): only time_window=all. Pass --include-placeholder-windows for 1y/5y placeholders.
+    """
+    graph_npz = str(Path(args.graph_npz))
+    keyword_index_dir = str(Path(args.keyword_index_dir)) if args.keyword_index_dir else None
+    coords_2d_path = str(Path(args.coords_2d_path)) if args.coords_2d_path else None
+    topic_csv = (
+        str(Path(args.topic_communities_csv).resolve())
+        if getattr(args, "topic_communities_csv", None)
+        else None
+    )
+
+    def _reg(
+        run_id: str,
+        algorithm: str,
+        time_window: str,
+        leiden_dir: Optional[str],
+        default_resolution: float,
+        *,
+        extra_tags: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        if not leiden_dir:
+            return None
+        ld = Path(leiden_dir)
+        if not ld.is_dir() or not (ld / "summary.npy").is_file():
+            return None
+        if algorithm == "leiden_cpm":
+            ptype = "CPMVertexPartition"
+        elif algorithm == "leiden":
+            ptype = "RBConfigurationVertexPartition"
+        else:
+            ptype = None
+        tags: Dict[str, Any] = {
+            "seeded_by": "experiment-init-minimal",
+            "topic_k": 10,
+            "breakpoint_policy": {"version": BREAKPOINT_POLICY_V1, "n_breakpoints": 10},
+        }
+        try:
+            sm_path = ld / "summary.npy"
+            if sm_path.is_file():
+                summary = np.load(sm_path, allow_pickle=True).item()
+                sw = infer_sweep_meta(summary)
+                if sw:
+                    tags["sweep"] = sw
+        except Exception:
+            pass
+        if extra_tags:
+            tags.update(extra_tags)
+        m = ExperimentRunManifest(
+            run_id=run_id,
+            algorithm=algorithm,  # type: ignore[arg-type]
+            time_window=time_window,  # type: ignore[arg-type]
+            title=f"{algorithm} {time_window}",
+            leiden_dir=str(ld.resolve()),
+            graph_npz=graph_npz,
+            keyword_index_dir=keyword_index_dir,
+            coords_2d_path=coords_2d_path,
+            topic_communities_csv=topic_csv,
+            default_resolution=float(default_resolution),
+            partition_type=ptype,
+            tags=tags,
+        )
+        p = save_manifest(BASE_DIR, m)
+        return str(p)
+
+    # Default 1y/5y to the same sweep dir as "all" so the catalog lists multiple time_window
+    # tags (UI shows win= switching). Replace with real window-refit dirs when you have them.
+    cpm_all = getattr(args, "leiden_cpm_all_dir", None)
+    cpm_5y = getattr(args, "leiden_cpm_5y_dir", None) or cpm_all
+    cpm_1y = getattr(args, "leiden_cpm_1y_dir", None) or cpm_all
+    rb_all = getattr(args, "leiden_all_dir", None)
+    rb_5y = getattr(args, "leiden_5y_dir", None) or rb_all
+    rb_1y = getattr(args, "leiden_1y_dir", None) or rb_all
+    coarse_all = getattr(args, "coarse_kmeans_all_dir", None)
+    coarse_5y = getattr(args, "coarse_kmeans_5y_dir", None) or coarse_all
+    coarse_1y = getattr(args, "coarse_kmeans_1y_dir", None) or coarse_all
+    dir_for: Dict[Tuple[str, str], Optional[str]] = {
+        ("leiden_cpm", "all"): cpm_all,
+        ("leiden_cpm", "5y"): cpm_5y,
+        ("leiden_cpm", "1y"): cpm_1y,
+        ("leiden", "all"): rb_all,
+        ("leiden", "5y"): rb_5y,
+        ("leiden", "1y"): rb_1y,
+        ("louvain", "all"): getattr(args, "louvain_all_dir", None),
+        ("louvain", "5y"): getattr(args, "louvain_5y_dir", None),
+        ("louvain", "1y"): getattr(args, "louvain_1y_dir", None),
+        ("coarse_kmeans", "all"): coarse_all,
+        ("coarse_kmeans", "5y"): coarse_5y,
+        ("coarse_kmeans", "1y"): coarse_1y,
+    }
+
+    tw_list = ("all", "5y", "1y") if bool(args.include_placeholder_windows) else ("all",)
+    saved: List[str] = []
+    for algo in ("leiden_cpm", "leiden", "louvain", "coarse_kmeans"):
+        for tw in tw_list:
+            ld_path = dir_for.get((algo, tw))
+            extra_tags: Optional[Dict[str, Any]] = None
+            if tw != "all" and ld_path:
+                all_path = dir_for.get((algo, "all"))
+                if all_path and Path(all_path).resolve() == Path(ld_path).resolve():
+                    extra_tags = {
+                        "time_window_not_refit": True,
+                        "time_window_note_zh": (
+                            "该 manifest 与「all」共用同一 leiden_dir：社区划分未在日历子图上重跑。"
+                            "网页启用「Publication years」后，中间图仅展示窗口内论文及其诱导边；"
+                            "要与日历一致的划分请运行 experiment-sweep-time-window（--write-manifest）并选用对应 run。"
+                        ),
+                    }
+            rid = algo if tw == "all" else f"{algo}_{tw}"
+            p = _reg(
+                run_id=rid,
+                algorithm=algo,
+                time_window=tw,
+                leiden_dir=ld_path,
+                default_resolution=float(args.default_resolution),
+                extra_tags=extra_tags,
+            )
+            if p is not None:
+                saved.append(p)
+    return {"saved_manifests": saved, "n_saved": len(saved)}
 
 
 # -----------------------------------------------------------------------------
@@ -1647,6 +2311,29 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--knn-batch-size", type=int, default=4096)
     sp.set_defaults(func=task_time_video)
 
+    register_experiment_subparsers(
+        sub,
+        ctx=ExperimentSubcommandHandlers(
+            experiment_manifest=task_experiment_manifest,
+            experiment_catalog=task_experiment_catalog,
+            experiment_sweep=task_experiment_sweep,
+            experiment_coarse_kmeans_sweep=task_experiment_coarse_kmeans_sweep,
+            experiment_sweep_time_window=task_experiment_sweep_time_window,
+            experiment_batch_time_windows=task_experiment_batch_time_windows,
+            experiment_eval=task_experiment_eval,
+            experiment_eval_bundle=task_experiment_eval_bundle,
+            experiment_init_minimal=task_experiment_init_minimal,
+            experiment_comparison_breakpoints=task_experiment_comparison_breakpoints,
+            experiment_retrieval_benchmark=task_experiment_retrieval_benchmark,
+            experiment_retrieval_sixway=task_experiment_retrieval_sixway,
+            experiment_viz_batch=task_experiment_viz_batch,
+        ),
+        base_dir=BASE_DIR,
+        out_dir=OUT_DIR,
+        emb_path=EMB_PATH,
+        add_common_runtime_flags=add_common_runtime_flags,
+    )
+
     # keyword-index
     sp = sub.add_parser("keyword-index", help="构建关键词检索索引")
     add_common_runtime_flags(sp)
@@ -1781,6 +2468,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="*",
         help="CORS allow_origins，逗号分隔；默认 *",
     )
+    sp.add_argument(
+        "--topic-communities-csv",
+        type=str,
+        default=None,
+        help="Topic-SCORE 的 communities_topic_weights.csv；注入社区 topic_info（与当前 sweep 的 community_id 对齐）",
+    )
     sp.set_defaults(func=task_demo_api)
 
     # topic-model
@@ -1830,6 +2523,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--skip-existing", action="store_true")
     sp.add_argument("--continue-on-error", action="store_true")
     sp.add_argument("--quiet", action="store_true")
+    sp.add_argument(
+        "--breakpoints-csv",
+        type=str,
+        default=None,
+        help="可选：仅跑 comparison_breakpoints.csv 中该 run 的 ~10 个分辨率（需同时 --breakpoint-run-id）",
+    )
+    sp.add_argument("--breakpoint-run-id", type=str, default=None, help="与 manifest run_id 一致，如 leiden_cpm")
+    sp.add_argument("--breakpoint-time-window", type=str, default="all")
+    sp.add_argument(
+        "--rep-papers-mode",
+        type=str,
+        default="approx",
+        choices=["exact", "approx", "off"],
+        help="代表论文：exact/approx 用引用中心性（大批次慢）；off 跳过中心性，按年份等回退（离线对比建议 off）",
+    )
     sp.set_defaults(func=task_topic_model_multi)
 
     # align-topics

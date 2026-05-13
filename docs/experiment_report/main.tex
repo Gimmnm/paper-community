@@ -1,0 +1,401 @@
+% !TEX program = xelatex
+% 离线四算法对比实验技术报告（中文）。在本文档所在目录执行：make 或 latexmk -xelatex main.tex
+\documentclass[UTF8,a4paper,11pt,fontset=fandol]{ctexart}
+
+\newcommand{\ComparisonRunTag}{master_breakpoints}
+
+\usepackage[a4paper,margin=1.75cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{xurl}
+\usepackage{caption}
+\usepackage{subcaption}
+
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue, breaklinks=true}
+\captionsetup{justification=raggedright, singlelinecheck=false, font=small, labelfont=bf}
+\captionsetup[subfigure]{justification=centering, font=footnotesize, skip=2pt}
+
+\makeatletter
+\newcommand{\SafeInclude}[2][width=\linewidth]{%
+  \IfFileExists{#2}{%
+    \includegraphics[#1]{#2}%
+  }{%
+    \par\medskip\noindent\fbox{\begin{minipage}{0.95\linewidth}\small\ttfamily
+    缺少图片文件（请先跑离线流水线生成 \texttt{out/} 下对应产物）。\\
+    可在 \texttt{main.tex} 中检查路径；占位不影响全文编译。
+    \end{minipage}}\par\medskip
+  }%
+}
+\makeatother
+
+\newcommand{\Out}{../../out}
+\newcommand{\SixwayPlot}{\Out/experiment_eval/retrieval_sixway_plots}
+\newcommand{\ResPlots}{\Out/experiment_eval/retrieval_resolution_plots}
+\newcommand{\TopicVizCpm}{\Out/topic_viz_batch/master__leiden_sweep_cpm/K10}
+\newcommand{\VizCpm}{\Out/viz_batch/master__leiden_sweep_cpm}
+
+\title{引文嵌入互近邻图上的社区发现与主题建模\\{\large 四算法离线对比实验说明（实现与读图指南）}}
+\author{paper-community 仓库离线实验管线整理}
+\date{\today}
+
+\begin{document}
+\sloppy
+\setlength{\emergencystretch}{2.8em plus .8em minus .4em}
+
+\maketitle
+
+\begin{abstract}
+本文档面向\textbf{复现实验、阅读离线图表与撰写论文方法部分}，系统说明本仓库在\textbf{同一张全局 mutual $k$-NN 图}上，对四种社区划分策略所做的\textbf{分辨率扫描（resolution sweep）}、\textbf{Topic-SCORE 主题建模}、\textbf{主题塌缩/有效主题数诊断}，以及\textbf{关键词检索、向量近邻、社区 bundle 扩散}三类检索通道的对比评测。
+
+四种社区算法为：\textbf{Louvain}（实现上采用 \texttt{RBERVertexPartition} 的多分辨率 Potts/ER 空模型）、\textbf{Leiden RB}（\texttt{RBConfigurationVertexPartition}）、\textbf{Leiden CPM}（\texttt{CPMVertexPartition}），以及\textbf{先在嵌入空间做 $k$-means 粗分域、再在各域的诱导子图上跑 CPM 并合并标签}的两阶段管线（主线脚本默认域内算法为 CPM）。
+
+全文与路径级细节以 \path{docs/offline-outputs-catalog.md} 为\textbf{单一事实来源}；本 PDF 侧重\textbf{概念、坐标轴、指标语义与读图禁则}。结论性判断与个案抽样分析留给作者自行补充。
+
+从\textbf{认识论}角度，本仓库提供的是「在同一数据与构图假设下，多种划分与下游指标的\textbf{可复现对照面}」，而不是对某一算法绝对优劣的终裁：社区划分本身无唯一真值，$r^\ast$ 与 Topic-SCORE 亦依赖超参数与随机性，正文应把\textbf{效应方向、稳定性与失败模式}写清楚，而非单点排行榜。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{引言：我们在比较什么？}
+
+\subsection{问题设定}
+给定论文语料与向量嵌入，我们构造\textbf{无向加权图} $G=(V,E,w)$：顶点为论文；边来自\textbf{互近邻（mutual $k$-NN）}——两篇论文若在彼此各自的 $k$ 个最近邻集合中互为邻居，则连边（权重由相似度导出，实现见 \path{foundation_layer/network.py}）。该图刻画「引用/语义邻域」的局部几何，是后续所有社区算法与 hop 距离度量的共同基础。
+
+\subsection{为何先固定构图再比较算法}
+若允许每种算法各自重构图或各自调 $k$，则「社区数—分辨率」曲线与检索 hop 将同时混杂\textbf{图结构差异}与\textbf{优化目标差异}，难以归因。本流水线把\textbf{mutual $k$-NN 与权重方案}锁死为一次全局产物，使四种划分至少在\textbf{相同的顶点邻域几何}上竞争；剩余差异主要来自 null 模型（RB/CPM/RBER）、是否粗分切断跨域边，以及实现层面的分辨率网格与随机种子。写作时建议在方法段明确这一\textbf{受控变量}，避免读者误以为比较的是「不同文献里的 Louvain 变体」而非本仓库的具体 \texttt{partition\_type} 组合。
+
+\subsection{分辨率参数 $r$ 的角色}
+本仓库中 Leiden/Louvain 系列均通过 \texttt{leidenalg} 在\textbf{同一离散分辨率网格}上重复划分。$r$ 增大通常使社区\textbf{更碎}（社区数上升），但具体曲线依赖算法族（RB/CPM/RBER）与图权重尺度。粗分两阶段管线在\textbf{每个域子图}上使用同一数值 $r$ 各跑一次，再在全局合并；因此「同一 $r$」表示\textbf{三个子图在同一标量分辨率上同时划分}，而不是三个独立调参轴。
+
+\textbf{跨算法读 $r$ 时务必谨慎：}RB 与 CPM 的 $r$ 进入\textbf{不同的统计物理目标}，数值上「看起来在同一网格上扫描」并不意味着「同一物理尖锐化程度」。跨算法对比更适合放在\textbf{社区规模带、VI 轨迹、断点集合}以及下游\textbf{主题/检索随 $r$ 的形态}上，而不是强行把两条 \texttt{n\_comm} 曲线在同一纵轴上解释为可替换的标量。
+
+\subsection{离线产物总览}
+\begin{itemize}
+  \item \textbf{社区 sweep}：\path{out/leiden_sweep_cpm/}、\path{out/leiden_sweep_rb/}、\path{out/leiden_sweep_louvain/}、\path{out/coarse_kmeans_then_cpm_k3_seed42/} 等；含 \texttt{membership\_r*.npy}、\path{summary.npy}、\path{eval/} 诊断图。
+  \item \textbf{实验登记与总览表}：\path{out/experiments/} 下 manifest；\path{out/experiment_eval/evaluation_overview.csv}。
+  \item \textbf{主题}：\path{out/topic_runs/} 下各 sweep 目录（如 \path{leiden_sweep_cpm/}）内的 \path{K10/r*/}；可选汇总诊断 \path{out/experiment_eval/topic_collapse_diagnostics/}。
+  \item \textbf{结构可视化}：\path{out/viz_batch/}；\textbf{主题可视化}：\path{out/topic_viz_batch/}。
+  \item \textbf{检索}：\path{out/comparison_runs/} 下各 tag 的 \path{metrics.jsonl}；以及 \path{out/experiment_eval/} 下六路与按分辨率汇总表、图。
+\end{itemize}
+
+\section{数据准备与图构建}
+
+\subsection{原始数据与嵌入}
+论文元数据与清洗后文本缓存在 \path{data/data_store.pkl}；向量嵌入默认路径为 \path{data/paper_embeddings_specter2.npy}（首行可为占位，下游与「论文数 $=N$」对齐的约定见代码与 catalog）。停用词等见 \path{data/stopwords.txt}。
+
+\subsection{全局 mutual $k$-NN 图}
+命令 \texttt{python src/core.py build-graph} 或实验脚本在 \path{out/} 写出 \path{mutual_knn_k50.npz}，内含边列表 \texttt{u,v,w} 与 \texttt{n\_nodes}。该 npz 是四种 sweep 与检索 hop 统计的\textbf{共享图}；粗分两阶段在各域上取\textbf{诱导子图}（只保留两端点都在域内的边），但边仍来源于\textbf{同一全局构图规则}。
+
+\subsection{二维布局 UMAP}
+\path{out/umap2d.npy} 为每篇论文的 2D 坐标，用于 \texttt{experiment-viz-batch}、\texttt{topic-viz} 与演示网页。坐标\textbf{无物理单位}，仅用于可视化相对位置。
+
+\subsection{关键词索引}
+\path{out/keyword_index/} 供 TF--IDF 关键词检索与 \path{metrics.jsonl} 中的 \texttt{mean\_keyword\_tfidf} 等派生指标；缺失时部分字段为空，六路图可能少子面板。
+
+\section{四种社区发现算法（实现语义）}
+
+\subsection{统一实现入口}
+\path{algorithm_layer/algorithm_pipeline.py} 中的 \texttt{run\_community\_sweep} 对单张 \texttt{igraph} 图在分辨率列表上循环，调用 \texttt{leidenalg.find\_partition}，按算法选择 \texttt{partition\_type}，并将每次的 \texttt{membership} 写入 \texttt{membership\_r*.npy}，最后写 \path{summary.npy}。
+
+\subsection{Leiden CPM（\texttt{leiden\_cpm}）}
+使用 \texttt{CPMVertexPartition}，分辨率参数进入 CPM 目标（常数 Potts 模型族）。在仓库默认编排中与「粗分域内」算法一致，便于对照「全图 CPM」与「先切块再 CPM」的差异。输出目录示例：\path{out/leiden_sweep_cpm/}。
+
+\subsection{Leiden RB（\texttt{leiden}，manifest 常记为 RB）}
+使用 \texttt{RBConfigurationVertexPartition}（Reichardt--Bornholdt 配置模型零假设）。与 CPM 的 null 与分辨率解释不同，\textbf{不可假设}与 CPM 在相同 $r$ 数值下社区数可比。输出目录示例：\path{out/leiden_sweep_rb/}。
+
+\subsection{Louvain（本仓库中的 \texttt{louvain} 标志）}
+实现上采用 \texttt{RBERVertexPartition} 以支持分辨率网格（见 \path{algorithm_layer/algorithm_pipeline.py} 注释）；与经典「单次模块度最大化」Louvain \textbf{不完全等价}，写作论文时应写明本仓库具体分区类。输出目录示例：\path{out/leiden_sweep_louvain/}。
+
+\subsection{粗分 $k$-means + 域内 CPM + 标签合并（\texttt{coarse\_kmeans}）}
+\textbf{步骤：}
+\begin{enumerate}
+  \item 在嵌入矩阵上对论文做 MiniBatch $k$-means（默认 $k{=}3$，种子 42），得域标签 \path{out/coarse_domains_kmeans_k3_seed42/labels.npy}。
+  \item 对每个域，在全局边上取\textbf{诱导子图}，调用与单图相同的 \texttt{run\_community\_sweep}，默认 \texttt{algorithm=leiden\_cpm}。
+  \item 对每个出现在\textbf{所有域 sweep 交集中的分辨率} $r$，读取各域 \texttt{membership}，将社区 id 按域顺序做\textbf{偏移拼接}，使不同域的 id 不冲突，得到长度 $=|V|$ 的全局 \texttt{membership\_r*.npy}。
+\end{enumerate}
+
+\textbf{合并后 \path{summary.npy}} 的社区数为全局唯一标签数；\texttt{time} 字段为\textbf{各域在该 $r$ 上耗时的和}，与「只在全图上跑一次」的算法\textbf{不可直接横向比秒数}，除非正文注明。
+
+合并目录示例：\path{out/coarse_kmeans_then_cpm_k3_seed42/}；调试子目录 \path{_domain_*_sweep/} 内保留各域单独 sweep。
+
+\section{分辨率扫描与每条 run 的 \texttt{eval/} 诊断}
+
+\subsection{\texttt{summary.npy} 中核心序列}
+对排序后的分辨率 $\{r_i\}_{i=1}^T$，记录：
+\begin{itemize}
+  \item \textbf{n\_comm}：该 $r_i$ 上\textbf{不同非负标签}的个数（实现中可能排除隔离点约定，见代码）。
+  \item \textbf{vi\_adjacent}：相邻两层划分之间的 \textbf{Variation of Information (VI)}，衡量「提高/降低一点 $r$ 时分区变化有多剧烈」。首点常为 NaN。
+  \item \textbf{quality}、\textbf{time}：分区质量与耗时（若复用磁盘 membership，时间可能接近加载开销）。
+\end{itemize}
+
+\subsection{\texttt{sweep\_diagnostics.png}（双纵轴折线）}
+\begin{itemize}
+  \item \textbf{上图}：横轴为 $r$，纵轴为社区数 \texttt{n\_comm}。
+  \item \textbf{下图}：横轴为 $r$，纵轴为相邻层 VI。
+  \item \textbf{竖线}：由 \texttt{detect\_breakpoints} 选出的若干「值得关注」的 $r$（综合社区数跳变与 VI 的鲁棒标准化得分）。
+\end{itemize}
+
+\begin{figure}[ht]
+  \centering
+  \SafeInclude[width=0.88\linewidth]{\Out/leiden_sweep_cpm/eval/sweep_diagnostics.png}
+  \caption{单图 CPM sweep 的诊断示例：上图社区数随 $r$ 变化，下图相邻分辨率 VI；竖线为自动断点候选。其他算法目录下结构相同。}
+  \label{fig:sweep-cpm}
+\end{figure}
+
+\subsection{\texttt{breakpoints\_overview.png}（条形 + 断点竖线）}
+\begin{itemize}
+  \item \textbf{横轴}：分辨率在 \texttt{summary} 中的\textbf{排序下标}（$0\ldots T-1$），\textbf{不是} $r$ 本身。
+  \item \textbf{纵轴}：$|\Delta \texttt{n\_comm}|$ 型社区数跳变量（实现为对序列做差分后取绝对值），用于观察「何处发生剧烈重组」。
+  \item 粉红竖线：与 \path{out/experiment_eval/comparison_breakpoints.csv} 策略相关的断点索引可视化。
+\end{itemize}
+
+\begin{figure}[ht]
+  \centering
+  \SafeInclude[width=0.92\linewidth]{\Out/leiden_sweep_cpm/eval/breakpoints_overview.png}
+  \caption{\texttt{breakpoints\_overview} 示例（CPM）：横轴为分辨率\textbf{排序下标}，纵轴为相邻层 $|\Delta\texttt{n\_comm}|$；粉红竖线为跨算法断点策略对应的索引。}
+  \label{fig:breakpoints-overview}
+\end{figure}
+
+\subsection{\texttt{layer\_link\_counts.png}（可选）}
+在最多 36 个抽样的相邻 $(r_{\mathrm{parent}},r_{\mathrm{child}})$ 上，构造父–子社区多数对应链接；只统计子社区中\textbf{与父社区交集占比}（\texttt{child\_share}）$\geq$ 默认 $0.1$ 的链接条数。横轴为子层 $r$，纵轴为保留链接数，用于观察分层追踪性是否随 $r$ 崩塌。
+
+\begin{figure}[ht]
+  \centering
+  \SafeInclude[width=0.92\linewidth]{\Out/leiden_sweep_cpm/eval/layer_link_counts.png}
+  \caption{\texttt{layer\_link\_counts} 示例（CPM）：若未生成该图，多为抽样或阈值条件未满足；占位编译不受影响。}
+  \label{fig:layer-link-counts}
+\end{figure}
+
+\subsection{与粗分算法的关系}
+粗分合并目录下的 \texttt{eval/} 三张图基于\textbf{合并后全局 membership} 的 \texttt{summary}，不是三张「各域独立」曲线。
+
+\section{跨算法断点与 \texttt{evaluation\_overview}}
+
+\subsection{\texttt{experiment-comparison-breakpoints}}
+从各算法 \path{summary.npy} 选取约 $K{=}10$ 个代表性分辨率，写入 \path{out/experiment_eval/comparison_breakpoints.csv}。
+
+\textbf{不同算法的 10 个 $r$ 数值不必对齐}。下游 \texttt{topic-model-multi}、\texttt{experiment-viz-batch}、\texttt{experiment-retrieval-benchmark} 默认按各自 manifest 的 \texttt{run\_id} 取子表。
+
+\subsection{\texttt{evaluation\_overview.csv}}
+每行对应登记表中一条 manifest（通常四算法 $\times$ 时间窗）。含分辨率范围、点数、社区数统计、\texttt{retrieval\_score}/\texttt{topic\_score}（由下游产物汇总）、以及 \path{eval/} 下图的相对路径。列级释义见 catalog 第5.1节。
+
+\subsection{断点表与总览表的用途边界}
+\path{comparison_breakpoints.csv} 是在\textbf{各算法自身} \path{summary.npy} 上选出的约十个「有代表性」的 $r$，用于\textbf{控制主题与可视化的计算量}，并不保证跨算法在分辨率数值上可逐点配对。因此，若论文需要「同一组 $r$ 上四算法并排」，应显式\textbf{另选一套对齐策略}（例如固定社区数分位数、或固定 VI 阈值），而不是默认断点表已做对齐。\path{evaluation_overview.csv} 中的汇总分数便于网页总览与初筛，但\textbf{不能替代}对 \path{eval/} 曲线与 topic/retrieval 长表的细读：单一标量往往压缩掉「高 $r$ 塌缩」「低 $r$ 巨型社区」等结构信息。
+
+\section{主题建模（Topic-SCORE）与多分辨率产物}
+
+\subsection{建模思路（文字版）}
+在固定全局主题数 $K$（如 10）下，将每篇论文划入某社区后，聚合社区内文本形成词--社区矩阵，再运行 Topic-SCORE 相关谱/优化步骤，得到\textbf{每个社区在 $K$ 个主题上的权重向量}。因此主题是\textbf{全局共享的基}，社区间差异体现在权重上。
+
+从\textbf{解释}上看，这一步等价于把每个社区当作一篇「由成员论文拼接而成的长文档」再做降维/分解：社区越大、成员越杂，词袋混合越强，越容易在固定 $K$ 下出现\textbf{少数主题支配}或权重接近退化。反之，社区过碎时每个社区文档过短，词频估计噪声大，主题方向不稳定。因此 Topic-SCORE 曲线应\textbf{与社区规模分布、主题塌缩诊断、top 词可读性}一并阅读，而不是孤立追求某个聚合 \texttt{topic\_score}。
+
+\subsection{目录与主要 CSV}
+根路径形如 \path{out/topic_runs/leiden_sweep_cpm/K10/}（\texttt{sweep} 名与 sweep 目录一致）。每个分辨率子目录含：
+\begin{itemize}
+  \item \path{communities_topic_weights.csv}：社区级主题权重、top1/top2、规模等。
+  \item \path{topics_top_words.csv}：各主题 top 词。
+  \item \path{topic_representative_communities.csv}：与主题最「代表」的社区摘要。
+\end{itemize}
+另有 \path{summary_multires.csv} 汇总多 $r$ 的状态与质量指标。
+
+\subsection{主题可视化（\texttt{topic\_viz\_batch}）}
+在 \path{out/topic_viz_batch/} 下各「前缀\_\_sweep」子目录的 \path{K10/} 中常见：
+\begin{itemize}
+  \item \path{frames_topic_umap/}：每篇论文按其所在社区的 \textbf{Top1 主题}上色（离散色，见 \path{topic_legend.png}）。
+  \item \path{curve_topic_prevalence_vs_resolution.png}：各训练主题槽位的\textbf{prevalence} 随 $r$ 的曲线（全局加权意义下的占比）。
+  \item \path{curve_top1_mass_vs_resolution.png}：各主题作为社区 top1 的「论文质量/计数」占比随 $r$。
+  \item \path{curve_ncomm_purity_vs_resolution.png}：社区数与平均 top1 权重等随 $r$ 的联合视图（具体系列以 \path{summary_visualization_metrics.csv} 为准）。
+\end{itemize}
+
+\begin{figure}[ht]
+  \centering
+  \begin{subfigure}[t]{0.48\linewidth}
+    \centering
+    \SafeInclude[width=\linewidth]{\TopicVizCpm/curve_topic_prevalence_vs_resolution.png}
+    \caption{各主题 prevalence 随 $r$}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.48\linewidth}
+    \centering
+    \SafeInclude[width=\linewidth]{\TopicVizCpm/curve_ncomm_purity_vs_resolution.png}
+    \caption{社区数与纯度等联合曲线}
+  \end{subfigure}
+  \caption{主题可视化示例（\texttt{master\_\_leiden\_sweep\_cpm}，$K{=}10$）：与正文「多分辨率主题轨迹」对应；其他 sweep 目录结构相同。}
+  \label{fig:topic-curves-cpm}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \SafeInclude[width=0.55\linewidth]{\TopicVizCpm/topic_legend.png}
+  \caption{主题离散色标示例（与 \protect\path{frames_topic_umap/} 目录中帧图一致）。}
+  \label{fig:topic-legend}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \SafeInclude[width=0.92\linewidth]{\TopicVizCpm/frames_topic_umap/frame_0003_r0.3210.png}
+  \caption{UMAP 上按社区 Top1 主题上色的一帧示例（CPM，$r{\approx}0.32$）；完整序列见 \protect\path{frames_topic_umap/}。}
+  \label{fig:topic-umap-frame}
+\end{figure}
+
+\section{有效主题数诊断（\texttt{diagnose-topic-collapse}）}
+
+\subsection{何时生成}
+在 \path{out/topic_runs/} 下已存在任意 \path{communities_topic_weights.csv} 时，\path{scripts/daily_workflow.sh}（\texttt{experiment-eval} 之后）或 \path{scripts/offline_comparison_master.sh} 的 \texttt{topics} 结束时会递归扫描并写出 \path{out/experiment_eval/topic_collapse_diagnostics/}。
+
+\subsection{指标（直观解释）}
+对行归一化后的社区--主题矩阵，可定义社区级熵 $H_i$ 与「有效主题数」$\exp(H_i)$。对全局 prevalence（跨社区加权平均再归一化）亦可算 Shannon 有效数 $\exp(H)$ 与 Simpson 相关估计。若 $\exp(H)\ll K$ 且单一主题长期主导 prevalence/top1，提示\textbf{主题塌缩}或「社区内语义过于单一」。
+
+\begin{figure}[ht]
+  \centering
+  \SafeInclude[width=0.88\linewidth]{\Out/experiment_eval/topic_collapse_diagnostics/effective_topics_vs_resolution.png}
+  \caption{主题塌缩诊断示例：有效主题数（多种估计）随分辨率 $r$ 的变化；若文件缺失请先跑 topics 与 daily workflow。}
+  \label{fig:topic-eff}
+\end{figure}
+
+\section{社区结构批量可视化（\texttt{experiment-viz-batch}）}
+
+\subsection{UMAP $\times$ 社区着色}
+对每个断点 $r$ 输出 \texttt{umap\_membership.png}：点为论文，颜色为社区 id。\textbf{上色规则}为 \texttt{labels\_to\_colors\_by\_centroid}：先在 UMAP 上算各社区质心，再按质心 $x$ 坐标排序后将社区映射到 \texttt{viridis} 上均匀取样——即\textbf{一社区一色}，\textbf{不是}同一社区内的渐变。
+
+\begin{figure}[ht]
+  \centering
+  \begin{subfigure}[t]{0.48\linewidth}
+    \centering
+    \SafeInclude[width=\linewidth]{\VizCpm/r0.0210/umap_membership.png}
+    \caption{较低 $r$（示例 \texttt{r0.0210}）}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.48\linewidth}
+    \centering
+    \SafeInclude[width=\linewidth]{\VizCpm/r0.9810/umap_membership.png}
+    \caption{较高 $r$（示例 \texttt{r0.9810}）}
+  \end{subfigure}
+  \caption{结构可视化示例（\texttt{master\_\_leiden\_sweep\_cpm}）：同一 UMAP 布局下仅换划分上色，便于直观看「变碎」效应；具体 $r$ 目录取决于断点表。}
+  \label{fig:umap-two-r-cpm}
+\end{figure}
+
+\subsection{粗分域图}
+若能在 \texttt{leiden\_dir} 解析到 k-means 的 \texttt{labels.npy}，额外输出 \texttt{umap\_kmeans\_domains.png}，用\textbf{域 id} 上色，用于与「合并后社区 id」区分。
+
+\subsection{社区元图与大社区子图}
+\path{community_meta_graph.png} 展示规模最大的若干社区之间的聚合边；\path{subgraphs_top*/} 与 \path{c*.png} 在 UMAP 上绘制单社区诱导子图，用于检查「巨型社区」内部是否仍多峰。
+
+\begin{figure}[ht]
+  \centering
+  \SafeInclude[width=0.92\linewidth]{\VizCpm/r0.3210/community_meta_graph.png}
+  \caption{社区元图示例（CPM，断点 \texttt{r0.3210}）：大社区之间的聚合连接，用于判断「是否出现单一大团吞噬中尺度结构」。}
+  \label{fig:community-meta-cpm}
+\end{figure}
+
+\section{检索对比与六路汇总图}
+
+\subsection{\texttt{metrics.jsonl} 粒度}
+每行对应一次评测：\textbf{(manifest 的 \texttt{run\_id}) $\times$ (分辨率) $\times$ (seed 论文 id)}。三个通道 \texttt{keyword}、\texttt{vector\_nn}、\texttt{community\_bundle} 各自记录耗时、平均余弦、平均 hop、（可选）TF--IDF 匹配、（可选）与 seed 社区 top1 主题一致比例等。
+
+因此，同一分辨率上的 JSONL 行数与 seed 覆盖范围直接决定\textbf{均值与方差的可靠性}：若 seed 过于集中某一子领域，六路对比可能只反映该领域的几何与词面特性。扩展评测时应在\textbf{manifest 与 seed 列表}两处留痕，便于审稿人核对可复现性。
+
+\subsection{六路（six-way）汇总语义}
+在 \path{out/experiment_eval/comparison_retrieval_sixway_long.csv} 中，每个 \texttt{comparison\_run\_tag} 固定六行：
+\begin{itemize}
+  \item \texttt{keyword}、\texttt{vector\_nn}：与分区无关，取自 canonical baseline 分区对应 JSONL 子集（优先级 \texttt{leiden\_cpm} $\to$ \texttt{leiden} $\to$ \texttt{louvain} $\to$ \texttt{coarse\_kmeans}）。
+  \item 四个 \texttt{community\_bundle:<run\_id>}：各社区划分下一行。
+\end{itemize}
+
+\textbf{概念上}，\texttt{vector\_nn} 反映嵌入几何中的局部可达性；\texttt{keyword} 反映词面重叠与索引质量；\texttt{community\_bundle} 则把「从 seed 出发、沿\textbf{当前划分下的社区成员关系}做扩散/合并」与上述两者并置。三路通道回答的问题不同，因此\textbf{不应期望}它们在数值上同向优化：例如更碎的划分可能缩短 hop，却损害主题一致性或关键词覆盖。六路图的价值在于揭示\textbf{哪类查询}对划分敏感、敏感出现在哪些指标位点，而不是给出单一「最优算法」。
+
+\subsection{按分辨率长表与最佳 \texorpdfstring{$r^\ast$}{r*}}
+\path{out/experiment_eval/comparison_retrieval_resolution_long.csv}：在固定 \texttt{run\_id} 与 \texttt{resolution\_effective} 下对 seed 聚合三路通道指标。\par
+\path{out/experiment_eval/comparison_retrieval_best_resolution_long.csv}：对每个社区分区在 \texttt{community\_bundle} 曲线上用\textbf{复合分数}（多指标在\textbf{该 run 全部 $r$} 上 min--max 归一化；hop 与时间越小越好需翻转）取 argmax 得 $r^\ast$；keyword/vector 在 baseline 的 $r^\ast$ 上读取。
+
+\textbf{关于 $r^\ast$ 的论述边界：}复合分数是\textbf{工程上可复现的标量化偏好}，权重隐含在脚本默认值中，并不等价于「统计意义上的最优分辨率」或「人类专家会选的 $r$」。若论文以 $r^\ast$ 为主张，应至少报告\textbf{相邻 $r$ 的敏感性}（曲线是否平坦、断点处是否跳跃）以及\textbf{更换权重/指标集合}时结论是否稳健；更稳妥的做法是把 $r^\ast$ 当作\textbf{展示用参考竖线}，把主要论证建立在曲线形状与失败案例上。
+
+\begin{figure}[ht]
+  \centering
+  \SafeInclude[width=\linewidth]{\SixwayPlot/retrieval_metric_lines__\ComparisonRunTag.png}
+  \caption{六路检索（\textbf{同指标位点内归一化}折线）：纵轴仅在同一指标、同一离散位点上有意义，便于看六路相对排序；与图~\ref{fig:sixway-abs} 的「分带绝对量」读法不同。}
+  \label{fig:sixway-norm}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \SafeInclude[width=\linewidth]{\SixwayPlot/retrieval_rankings__\ComparisonRunTag.png}
+  \caption{六路在各指标上的\textbf{秩次}汇总（若已生成）：强调相对排序而非绝对量纲。}
+  \label{fig:sixway-rank}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \SafeInclude[width=\linewidth]{\SixwayPlot/retrieval_metric_absolute_lines__\ComparisonRunTag.png}
+  \caption{六路检索对比（\textbf{分带绝对量}折线）：横轴为离散指标位点；每个指标一条水平带，带内映射该指标六路\textbf{绝对均值}到区间 $[\mathrm{min},\mathrm{max}]$（旁注）。\newline
+  \texttt{hops}、\texttt{time\_s} 在带内已按「越小越好」翻转。\textbf{禁止跨带比较纵坐标高低}；带内可比较六路相对优劣。当前 tag：\protect\expandafter\nolinkurl\expandafter{\ComparisonRunTag}。}
+  \label{fig:sixway-abs}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \SafeInclude[width=\linewidth]{\Out/experiment_eval/retrieval_resolution_plots/retrieval_resolution_bundle_vs_r__\ComparisonRunTag.png}
+  \caption{四社区算法子图：\texttt{community\_bundle} 多指标随 $r$ 变化；每子图内独立 min--max 归一化；粗线为复合分数；竖线标示自动选取的 $r^\ast$。不同子图的 $r$ 轴\textbf{不需要数值对齐}。}
+  \label{fig:res-bundles}
+\end{figure}
+
+\begin{figure}[ht]
+  \centering
+  \SafeInclude[width=\linewidth]{\ResPlots/retrieval_best_pick_metric_lines__\ComparisonRunTag.png}
+  \caption{按复合分数自动选取 $r^\ast$ 后，各指标在「最佳分辨率」处的\textbf{绝对量}对比（若已生成）：用于报告「挑完 $r$ 后谁在哪项上领先」，仍应注意指标间不可比性。}
+  \label{fig:retrieval-best-pick}
+\end{figure}
+
+\paragraph{读图禁则小结}
+\begin{itemize}
+  \item \textbf{retrieval\_metric\_lines}（归一化折线，若生成）：同一指标位点内比较六路有意义。
+  \item \textbf{retrieval\_metric\_absolute\_lines}（本分带图）：仅\textbf{带内}比较；不可把不同指标的纵向位置当作同一物理量。
+  \item \textbf{retrieval\_resolution\_bundle\_vs\_r}：归一化仅在\textbf{单格子面板}内有效。
+\end{itemize}
+
+\section{表格化总览与网页/API 对齐}
+
+\path{out/experiment_eval/evaluation_overview.csv} 与 \path{out/experiment_eval/evaluation_overview.json} 供网页 Eval 与论文总表；\path{out/experiment_eval/comparison_breakpoints.csv} 供断点分辨率下拉；\path{out/experiment_eval/comparison_retrieval_sixway_*.csv} 与 \path{out/experiment_eval/comparison_retrieval_resolution_*.csv} 供检索对比与作图脚本消费。\par
+任何列名或路径变更须同步更新 \path{docs/offline-outputs-catalog.md} 与聚合脚本。
+
+\section{讨论与后续工作}
+
+\subsection{算法族之间的系统差异（写结论时的「防过度解读」清单）}
+四算法在\textbf{零假设、分辨率解释、是否显式引入域结构}上均不一致：RB/CPM/RBER 对应不同的 Potts/随机图参照；粗分 CPM 先在嵌入空间切块，再在域内诱导子图上优化，\textbf{主动移除了大量跨域边}，因此它刻画的是「域内细社区 + 域间稀疏桥」的世界观，与全图 CPM 的\textbf{中尺度桥接结构}可能显著不同。写作时建议避免「某算法在社区数上赢了」这类\textbf{单标量胜负}，改为对照：\textbf{(i)} 社区规模分布与巨型社区比例；\textbf{(ii)} VI 与断点处的重组模式；\textbf{(iii)} 主题有效数与 top 词是否可解释；\textbf{(iv)} 检索三路是否出现系统性 trade-off。
+
+\subsection{主题建模与社区粒度的耦合}
+固定 $K$ 的 Topic-SCORE 把社区当作聚合文档：社区\textbf{过碎}时词频估计不稳，主题方向易抖动；社区\textbf{过大}或语义混杂时，固定 $K$ 下易出现\textbf{主题塌缩}（少数槽位吃掉大部分质量）。因此「好的划分」在主题指标上未必单调：有时略碎的划分反而提高社区内同质性，使主题更清晰。解读时应结合 \path{out/experiment_eval/topic_collapse_diagnostics/}、\path{curve_*_vs_resolution.png} 与人工扫读 \path{topics_top_words.csv}，必要时对\textbf{代表性社区}做个案段落，而不是只引用汇总 \texttt{topic\_score}。
+
+\subsection{检索评测能说明什么、不能说明什么}
+本管线的检索通道是\textbf{可重复、可横向对照}的工程探针：它们依赖固定的 seed 集合、固定的图与索引，适合比较「换划分后，局部可达性与 hop 统计如何变化」。它们\textbf{不声称}覆盖真实用户检索行为、也不等价于线上排序指标；\texttt{community\_bundle} 尤其依赖划分质量与社区内部连通性，对「坏划分」会放大异常。若论文主结论依赖检索，建议补充：seed 是否覆盖冷门领域、关键词通道在停用词/词表变更下的稳定性，以及是否需要在\textbf{另一套 seed 或另一嵌入模型}上复验。
+
+\subsection{超参数与复现风险（后续工作入口）}
+除分辨率网格外，全局构图的 $k$、边权定义、粗分 $k$-means 的 $k$ 与种子、Topic-SCORE 的 $K$、检索 seed 与通道权重，都会移动整条实验曲线。仓库内脚本尽量把这些写进 manifest 与 catalog，但\textbf{科学结论}仍应通过\textbf{小规模敏感性表}或附录曲线交代「结论在多大邻域内成立」。后续可工作包括：对齐跨算法 $r$ 的替代策略、在多种 $k$ 与嵌入上重复主表、以及将个案分析模板化（本仓库未内置自动个案报告）。
+
+作者可在此续写：针对具体数据集的主结论、与领域基线的对照、以及明确的局限与威胁复现（threats to validity）段落。
+
+\appendix
+
+\section{复现命令（推荐顺序）}
+\begin{verbatim}
+bash scripts/offline_comparison_master.sh sweep
+bash scripts/daily_workflow.sh
+bash scripts/offline_comparison_master.sh topics
+bash scripts/offline_comparison_master.sh viz
+bash scripts/offline_comparison_master.sh topic-viz
+bash scripts/offline_comparison_master.sh retrieval
+\end{verbatim}
+
+检索评测的 \texttt{<tag>} 由环境变量或脚本参数决定；\texttt{experiment-eval} 可用 \texttt{--comparison-run-tag} 或 \texttt{PC\_EVAL\_COMPARISON\_RUN\_TAGS} 指定读取哪些 \path{out/comparison_runs/<tag>/}。
+
+\section{缩写与符号}
+\begin{description}
+  \item[kNN] $k$ 最近邻；mutual kNN 要求互为邻居才连边。
+  \item[RB / CPM / RBER] \texttt{leidenalg} 中三种顶点分区类，对应不同统计物理式目标。
+  \item[VI] Variation of Information，比较两层划分的信息量距离。
+  \item[$r^\ast$] 检索管线在 \texttt{community\_bundle} 曲线上自动选取的偏好分辨率（定义见 catalog 第8.2节）。
+\end{description}
+
+\end{document}
